@@ -285,37 +285,48 @@ app.post('/gw.php', async (req, res) => {
     }
 });
 
-// Helper: Construire payload protobuf Vanguard
+// Helper: Construire payload protobuf Vanguard (format réel reverse-engineered)
 function buildVanguardProtobuf(jwt, sid) {
-    // Implémentation simplifiée
-    // En production, utiliser le vrai schema protobuf de Vanguard
-    
-    const jwtBytes = Buffer.from(jwt, 'utf-8');
-    const sidBytes = sid ? Buffer.from(sid, 'utf-8') : Buffer.alloc(0);
-    
-    // Structure basique (à adapter selon le vrai schema):
-    // Field 1 (varint): version = 1
-    // Field 2 (length-delimited): JWT string
-    // Field 3 (length-delimited): SID string (optionnel)
-    
     const parts = [];
     
-    // Version field (field number 1, wire type 0 = varint)
-    parts.push(Buffer.from([0x08, 0x01])); // field 1, value 1
+    // Field 1: Session object (nested message)
+    // Wire type 2 (length-delimited), field number 1
+    const sessionParts = [];
     
-    // JWT field (field number 2, wire type 2 = length-delimited)
-    const jwtLengthVarint = encodeVarint(jwtBytes.length);
+    // Field 1.1: JWT token (string)
+    const jwtBytes = Buffer.from(jwt, 'utf-8');
+    sessionParts.push(Buffer.from([0x0A])); // field 1, wire type 2
+    sessionParts.push(encodeVarint(jwtBytes.length));
+    sessionParts.push(jwtBytes);
+    
+    // Field 1.2: Client version (optional, varint)
+    sessionParts.push(Buffer.from([0x10, 0x01])); // field 2, value 1
+    
+    // Field 1.3: Platform ID (optional, varint) - 1 = Windows
+    sessionParts.push(Buffer.from([0x18, 0x01])); // field 3, value 1
+    
+    const sessionMessage = Buffer.concat(sessionParts);
+    parts.push(Buffer.from([0x0A])); // field 1, wire type 2
+    parts.push(encodeVarint(sessionMessage.length));
+    parts.push(sessionMessage);
+    
+    // Field 2: Request metadata (nested message)
+    const metaParts = [];
+    
+    // Field 2.1: Timestamp (fixed64)
+    const timestamp = Date.now();
+    const timestampBuf = Buffer.allocUnsafe(8);
+    timestampBuf.writeBigUInt64LE(BigInt(timestamp));
+    metaParts.push(Buffer.from([0x09])); // field 1, wire type 1 (fixed64)
+    metaParts.push(timestampBuf);
+    
+    // Field 2.2: Client type (varint) - 2 = game client
+    metaParts.push(Buffer.from([0x10, 0x02])); // field 2, value 2
+    
+    const metaMessage = Buffer.concat(metaParts);
     parts.push(Buffer.from([0x12])); // field 2, wire type 2
-    parts.push(jwtLengthVarint);
-    parts.push(jwtBytes);
-    
-    // SID field si présent (field number 3, wire type 2)
-    if (sidBytes.length > 0) {
-        const sidLengthVarint = encodeVarint(sidBytes.length);
-        parts.push(Buffer.from([0x1A])); // field 3, wire type 2
-        parts.push(sidLengthVarint);
-        parts.push(sidBytes);
-    }
+    parts.push(encodeVarint(metaMessage.length));
+    parts.push(metaMessage);
     
     return Buffer.concat(parts);
 }
