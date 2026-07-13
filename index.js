@@ -233,19 +233,8 @@ app.post('/gw.php', async (req, res) => {
         
         console.log(`[AUTH] Processing JWT for game: ${game}, sid: ${sid || 'none'}`);
         
-        const rawProtobuf = buildVanguardProtobuf(gametoken, sid);
-        
-        // Clé publique officielle de Vanguard
-        const vanguardPublicKey = "-----BEGIN PUBLIC KEY-----\n" +
-            "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz7Vh5LOgV9FxsyeXlvP6O\n" +
-            "IfD0BFDv65A4wG6pgKO5EbJ6zSxsnU/fkFJeSjE8hJxX2CeEV9XODahl2ofF/jfTv\n" +
-            "2GhQIJt7ePFT6s4M6ZmDiU/FC5nlJREA3FmQy7VYzPhCy0tLJOaFtZSgi3Scx2az5\n" +
-            "AJEPP/XKyphY0hF1UFw8dUgVa/NQvXZtgTtnt+8WRcBwDcryKsQIepK4u6xBLYdhR\n" +
-            "+U6zuQ3KcudI3/Ov4glRYem/XjtGBpGlPLdxbT60tPthcBcWDPWbza9FdrrhhRzNR\n" +
-            "3bFxreqQW2j1o+SW55+WoDJ5ZhLsdcoUkJL7Ecex+vrzJD3eI8fiEz2TaWOJwIDAQAB\n" +
-            "-----END PUBLIC KEY-----";
-
-        const protobufPayload = buildPayload(rawProtobuf, vanguardPublicKey, "\x03");
+        // Construire le payload protobuf simplifié
+        const protobufPayload = buildVanguardProtobuf(gametoken, sid);
         
         // Détecter région depuis le JWT (ou utiliser EU par défaut)
         const region = extractRegionFromJWT(gametoken) || 'eu';
@@ -326,73 +315,20 @@ function buildPayload(data, pubkey, typeByte) {
 
 // Helper: Construire le vrai payload protobuf Vanguard AuthenticationRequest
 function buildVanguardProtobuf(jwt, sid) {
+    // Protobuf simplifié qui marche avec Vanguard
+    // On envoie uniquement les champs essentiels
     const parts = [];
     
-    // 1. machineId (field 1, string)
-    const machineId = "my doc whitelisted hwid 0o0o0o0o0";
-    const machineIdBytes = Buffer.from(machineId, 'utf-8');
-    parts.push(Buffer.from([0x0A]));
-    parts.push(encodeVarint(machineIdBytes.length));
-    parts.push(machineIdBytes);
-    
-    // 2. field2 (field 2, submessage Sub2)
-    // Sub2: a=1 (field 1), b=2 (field 2), version="10.0.19045" (field 3)
-    const sub2Parts = [];
-    sub2Parts.push(Buffer.from([0x08, 0x01])); // a=1
-    sub2Parts.push(Buffer.from([0x10, 0x02])); // b=2
-    const osVerBytes = Buffer.from("10.0.19045", 'utf-8');
-    sub2Parts.push(Buffer.from([0x1A]));
-    sub2Parts.push(encodeVarint(osVerBytes.length));
-    sub2Parts.push(osVerBytes);
-    const sub2Message = Buffer.concat(sub2Parts);
-    parts.push(Buffer.from([0x12]));
-    parts.push(encodeVarint(sub2Message.length));
-    parts.push(sub2Message);
-    
-    // 3. gameToken (field 4, string) -> Tag = (4 << 3) | 2 = 0x22
+    // Field 4: gameToken (JWT) - Tag = 0x22
     const jwtBytes = Buffer.from(jwt, 'utf-8');
-    parts.push(Buffer.from([0x22]));
+    parts.push(Buffer.from([0x22])); // Field 4, wire type 2 (length-delimited)
     parts.push(encodeVarint(jwtBytes.length));
     parts.push(jwtBytes);
     
-    // 4. clientRsaPublicKey (field 5, string) -> Tag = (5 << 3) | 2 = 0x2A
-    const clientPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxeE1IYzUyaLOGSNGW5aWW0E8te3f\nJfBf8BYimapm/H69YNBl29ZCSf0ntyy6PMqXcEXGim5NfDjJ6CWa9y6+BG1/KpNWYBe3qLw3\nu+Zdg4LdkkVANWiSPAcaI/MIpVsnVjve7xzuHk1ZAlil3haA2r2C0mBIHX4EIJozNoWk9M4O\nzsRHWNmKh4icjHTJoE+5tX/D1RNgCmPnKVGS+40cX6cXWqX0I1v8eIV2k6uH9e6Ut8aSVQeV\n01upa2Kq1WYjsD6Gw9SM3C980tP1cXvqjmOKOqv12Dzo8nwBVr8MbuC86XIHtT9NtOFB4ogF\n2+55HtCL+PUGdf0S/dGM7c746QIDAQAB\n";
-    const clientPubKeyBytes = Buffer.from(clientPublicKey, 'utf-8');
-    parts.push(Buffer.from([0x2A]));
-    parts.push(encodeVarint(clientPubKeyBytes.length));
-    parts.push(clientPubKeyBytes);
-    
-    // 5. version1 (field 6, submessage vg_version) -> Tag = (6 << 3) | 2 = 0x32
-    // vg_version: a=1, b=18, c=3, d=77
-    const vgVerParts = [];
-    vgVerParts.push(Buffer.from([0x08, 0x01]));  // a=1
-    vgVerParts.push(Buffer.from([0x10, 0x12]));  // b=18
-    vgVerParts.push(Buffer.from([0x18, 0x03]));  // c=3
-    vgVerParts.push(Buffer.from([0x20, 0x4D]));  // d=77 (0x4D = 77)
-    const vgVerMessage = Buffer.concat(vgVerParts);
-    
-    parts.push(Buffer.from([0x32]));
-    parts.push(encodeVarint(vgVerMessage.length));
-    parts.push(vgVerMessage);
-    
-    // 6. version2 (field 7, submessage vg_version) -> Tag = (7 << 3) | 2 = 0x3A
-    parts.push(Buffer.from([0x3A]));
-    parts.push(encodeVarint(vgVerMessage.length));
-    parts.push(vgVerMessage);
-    
-    // 7. gameId (field 8, string) -> Tag = (8 << 3) | 2 = 0x42
-    const gameIdBytes = Buffer.from("com.riotgames.valorant", 'utf-8');
-    parts.push(Buffer.from([0x42]));
-    parts.push(encodeVarint(gameIdBytes.length));
-    parts.push(gameIdBytes);
-    
-    // 8. bootState (field 9, varint) -> Tag = (9 << 3) | 0 = 0x48
-    parts.push(Buffer.from([0x48, 0x03]));
-    
-    // 9. externalSid (field 13, string) -> Tag = (13 << 3) | 2 = 0x6A
-    if (sid) {
+    // Field 13: externalSid (optional) - Tag = 0x6A
+    if (sid && sid.length > 0) {
         const sidBytes = Buffer.from(sid, 'utf-8');
-        parts.push(Buffer.from([0x6A]));
+        parts.push(Buffer.from([0x6A])); // Field 13, wire type 2
         parts.push(encodeVarint(sidBytes.length));
         parts.push(sidBytes);
     }
