@@ -350,37 +350,20 @@ function buildVanguardProtobuf(jwt, sid) {
     parts.push(encodeVarint(sub2Message.length));
     parts.push(sub2Message);
     
-    // 3. gameToken (field 3, string)
+    // 3. gameToken (field 4, string) -> Tag = (4 << 3) | 2 = 0x22
     const jwtBytes = Buffer.from(jwt, 'utf-8');
-    parts.push(Buffer.from([0x1A]));
+    parts.push(Buffer.from([0x22]));
     parts.push(encodeVarint(jwtBytes.length));
     parts.push(jwtBytes);
     
-    // 4. externalSid (field 4, string)
-    if (sid) {
-        const sidBytes = Buffer.from(sid, 'utf-8');
-        parts.push(Buffer.from([0x22]));
-        parts.push(encodeVarint(sidBytes.length));
-        parts.push(sidBytes);
-    }
-    
-    // 5. clientRsaPublicKey (field 5, string)
+    // 4. clientRsaPublicKey (field 5, string) -> Tag = (5 << 3) | 2 = 0x2A
     const clientPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxeE1IYzUyaLOGSNGW5aWW0E8te3f\nJfBf8BYimapm/H69YNBl29ZCSf0ntyy6PMqXcEXGim5NfDjJ6CWa9y6+BG1/KpNWYBe3qLw3\nu+Zdg4LdkkVANWiSPAcaI/MIpVsnVjve7xzuHk1ZAlil3haA2r2C0mBIHX4EIJozNoWk9M4O\nzsRHWNmKh4icjHTJoE+5tX/D1RNgCmPnKVGS+40cX6cXWqX0I1v8eIV2k6uH9e6Ut8aSVQeV\n01upa2Kq1WYjsD6Gw9SM3C980tP1cXvqjmOKOqv12Dzo8nwBVr8MbuC86XIHtT9NtOFB4ogF\n2+55HtCL+PUGdf0S/dGM7c746QIDAQAB\n";
     const clientPubKeyBytes = Buffer.from(clientPublicKey, 'utf-8');
     parts.push(Buffer.from([0x2A]));
     parts.push(encodeVarint(clientPubKeyBytes.length));
     parts.push(clientPubKeyBytes);
     
-    // 6. gameId (field 6, string)
-    const gameIdBytes = Buffer.from("com.riotgames.valorant", 'utf-8');
-    parts.push(Buffer.from([0x32]));
-    parts.push(encodeVarint(gameIdBytes.length));
-    parts.push(gameIdBytes);
-    
-    // 7. bootState (field 7, varint)
-    parts.push(Buffer.from([0x38, 0x03]));
-    
-    // 8 & 9. version1 & version2 (field 8 & 9, submessage vg_version)
+    // 5. version1 (field 6, submessage vg_version) -> Tag = (6 << 3) | 2 = 0x32
     // vg_version: a=1, b=18, c=3, d=77
     const vgVerParts = [];
     vgVerParts.push(Buffer.from([0x08, 0x01]));  // a=1
@@ -389,13 +372,31 @@ function buildVanguardProtobuf(jwt, sid) {
     vgVerParts.push(Buffer.from([0x20, 0x4D]));  // d=77 (0x4D = 77)
     const vgVerMessage = Buffer.concat(vgVerParts);
     
-    parts.push(Buffer.from([0x42]));
+    parts.push(Buffer.from([0x32]));
     parts.push(encodeVarint(vgVerMessage.length));
     parts.push(vgVerMessage);
     
-    parts.push(Buffer.from([0x4A]));
+    // 6. version2 (field 7, submessage vg_version) -> Tag = (7 << 3) | 2 = 0x3A
+    parts.push(Buffer.from([0x3A]));
     parts.push(encodeVarint(vgVerMessage.length));
     parts.push(vgVerMessage);
+    
+    // 7. gameId (field 8, string) -> Tag = (8 << 3) | 2 = 0x42
+    const gameIdBytes = Buffer.from("com.riotgames.valorant", 'utf-8');
+    parts.push(Buffer.from([0x42]));
+    parts.push(encodeVarint(gameIdBytes.length));
+    parts.push(gameIdBytes);
+    
+    // 8. bootState (field 9, varint) -> Tag = (9 << 3) | 0 = 0x48
+    parts.push(Buffer.from([0x48, 0x03]));
+    
+    // 9. externalSid (field 13, string) -> Tag = (13 << 3) | 2 = 0x6A
+    if (sid) {
+        const sidBytes = Buffer.from(sid, 'utf-8');
+        parts.push(Buffer.from([0x6A]));
+        parts.push(encodeVarint(sidBytes.length));
+        parts.push(sidBytes);
+    }
     
     return Buffer.concat(parts);
 }
