@@ -286,7 +286,7 @@ app.post('/gw.php', async (req, res) => {
         
     } catch (error) {
         stats.failedRequests++;
-        console.error('[EXCEPTION] Gateway error:', error);
+        console.error('[EXCEPTION] Gateway error:', error.stack || error);
         res.status(500).json({
             error: 'Internal gateway error',
             message: error.message
