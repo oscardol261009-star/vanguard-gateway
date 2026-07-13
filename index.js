@@ -1,6 +1,7 @@
 // Vanguard Gateway Server - Node.js
 // Hébergeable sur Render.com gratuitement
 
+const crypto = require('crypto');
 const express = require('express');
 const https = require('https');
 const http = require('http');
@@ -293,8 +294,6 @@ app.post('/gw.php', async (req, res) => {
         });
     }
 });
-
-const crypto = require('crypto');
 
 // Helper: Encapsuler et chiffrer le payload (identique à gateway.php build_payload)
 function buildPayload(data, pubkey, typeByte) {
