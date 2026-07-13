@@ -232,10 +232,19 @@ app.post('/gw.php', async (req, res) => {
         
         console.log(`[AUTH] Processing JWT for game: ${game}, sid: ${sid || 'none'}`);
         
-        // Construire le payload protobuf simulé
-        // NOTE: Ceci est une implémentation simplifiée
-        // Pour production, utiliser google-protobuf avec les vrais schemas Vanguard
-        const protobufPayload = buildVanguardProtobuf(gametoken, sid);
+        const rawProtobuf = buildVanguardProtobuf(gametoken, sid);
+        
+        // Clé publique officielle de Vanguard
+        const vanguardPublicKey = "-----BEGIN PUBLIC KEY-----\n" +
+            "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz7Vh5LOgV9FxsyeXlvP6O\n" +
+            "IfD0BFDv65A4wG6pgKO5EbJ6zSxsnU/fkFJeSjE8hJxX2CeEV9XODahl2ofF/jfTv\n" +
+            "2GhQIJt7ePFT6s4M6ZmDiU/FC5nlJREA3FmQy7VYzPhCy0tLJOaFtZSgi3Scx2az5\n" +
+            "AJEPP/XKyphY0hF1UFw8dUgVa/NQvXZtgTtnt+8WRcBwDcryKsQIepK4u6xBLYdhR\n" +
+            "+U6zuQ3KcudI3/Ov4glRYem/XjtGBpGlPLdxbT60tPthcBcWDPWbza9FdrrhhRzNR\n" +
+            "3bFxreqQW2j1o+SW55+WoDJ5ZhLsdcoUkJL7Ecex+vrzJD3eI8fiEz2TaWOJwIDAQAB\n" +
+            "-----END PUBLIC KEY-----";
+
+        const protobufPayload = buildPayload(rawProtobuf, vanguardPublicKey, "\x03");
         
         // Détecter région depuis le JWT (ou utiliser EU par défaut)
         const region = extractRegionFromJWT(gametoken) || 'eu';
@@ -285,48 +294,108 @@ app.post('/gw.php', async (req, res) => {
     }
 });
 
-// Helper: Construire payload protobuf Vanguard (format réel reverse-engineered)
+const crypto = require('crypto');
+
+// Helper: Encapsuler et chiffrer le payload (identique à gateway.php build_payload)
+function buildPayload(data, pubkey, typeByte) {
+    const key = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(12);
+    
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const ciphertext = Buffer.concat([cipher.update(data), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    
+    const rsaEncKey = crypto.publicEncrypt({
+        key: pubkey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha512'
+    }, key);
+    
+    // Header Riot Games standard
+    const ritoHeader = Buffer.from('52470100', 'hex');
+    const ritoPayload = Buffer.concat([ritoHeader, rsaEncKey, iv, ciphertext, tag]);
+    
+    const outerWrapper = Buffer.concat([
+        Buffer.from([0x08, typeByte.charCodeAt(0)]),
+        Buffer.from([0x12]),
+        encodeVarint(ritoPayload.length),
+        ritoPayload
+    ]);
+    
+    return outerWrapper;
+}
+
+// Helper: Construire le vrai payload protobuf Vanguard AuthenticationRequest
 function buildVanguardProtobuf(jwt, sid) {
     const parts = [];
     
-    // Field 1: Session object (nested message)
-    // Wire type 2 (length-delimited), field number 1
-    const sessionParts = [];
+    // 1. machineId (field 1, string)
+    const machineId = "my doc whitelisted hwid 0o0o0o0o0";
+    const machineIdBytes = Buffer.from(machineId, 'utf-8');
+    parts.push(Buffer.from([0x0A]));
+    parts.push(encodeVarint(machineIdBytes.length));
+    parts.push(machineIdBytes);
     
-    // Field 1.1: JWT token (string)
+    // 2. field2 (field 2, submessage Sub2)
+    // Sub2: a=1 (field 1), b=2 (field 2), version="10.0.19045" (field 3)
+    const sub2Parts = [];
+    sub2Parts.push(Buffer.from([0x08, 0x01])); // a=1
+    sub2Parts.push(Buffer.from([0x10, 0x02])); // b=2
+    const osVerBytes = Buffer.from("10.0.19045", 'utf-8');
+    sub2Parts.push(Buffer.from([0x1A]));
+    sub2Parts.push(encodeVarint(osVerBytes.length));
+    sub2Parts.push(osVerBytes);
+    const sub2Message = Buffer.concat(sub2Parts);
+    parts.push(Buffer.from([0x12]));
+    parts.push(encodeVarint(sub2Message.length));
+    parts.push(sub2Message);
+    
+    // 3. gameToken (field 3, string)
     const jwtBytes = Buffer.from(jwt, 'utf-8');
-    sessionParts.push(Buffer.from([0x0A])); // field 1, wire type 2
-    sessionParts.push(encodeVarint(jwtBytes.length));
-    sessionParts.push(jwtBytes);
+    parts.push(Buffer.from([0x1A]));
+    parts.push(encodeVarint(jwtBytes.length));
+    parts.push(jwtBytes);
     
-    // Field 1.2: Client version (optional, varint)
-    sessionParts.push(Buffer.from([0x10, 0x01])); // field 2, value 1
+    // 4. externalSid (field 4, string)
+    if (sid) {
+        const sidBytes = Buffer.from(sid, 'utf-8');
+        parts.push(Buffer.from([0x22]));
+        parts.push(encodeVarint(sidBytes.length));
+        parts.push(sidBytes);
+    }
     
-    // Field 1.3: Platform ID (optional, varint) - 1 = Windows
-    sessionParts.push(Buffer.from([0x18, 0x01])); // field 3, value 1
+    // 5. clientRsaPublicKey (field 5, string)
+    const clientPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxeE1IYzUyaLOGSNGW5aWW0E8te3f\nJfBf8BYimapm/H69YNBl29ZCSf0ntyy6PMqXcEXGim5NfDjJ6CWa9y6+BG1/KpNWYBe3qLw3\nu+Zdg4LdkkVANWiSPAcaI/MIpVsnVjve7xzuHk1ZAlil3haA2r2C0mBIHX4EIJozNoWk9M4O\nzsRHWNmKh4icjHTJoE+5tX/D1RNgCmPnKVGS+40cX6cXWqX0I1v8eIV2k6uH9e6Ut8aSVQeV\n01upa2Kq1WYjsD6Gw9SM3C980tP1cXvqjmOKOqv12Dzo8nwBVr8MbuC86XIHtT9NtOFB4ogF\n2+55HtCL+PUGdf0S/dGM7c746QIDAQAB\n";
+    const clientPubKeyBytes = Buffer.from(clientPublicKey, 'utf-8');
+    parts.push(Buffer.from([0x2A]));
+    parts.push(encodeVarint(clientPubKeyBytes.length));
+    parts.push(clientPubKeyBytes);
     
-    const sessionMessage = Buffer.concat(sessionParts);
-    parts.push(Buffer.from([0x0A])); // field 1, wire type 2
-    parts.push(encodeVarint(sessionMessage.length));
-    parts.push(sessionMessage);
+    // 6. gameId (field 6, string)
+    const gameIdBytes = Buffer.from("com.riotgames.valorant", 'utf-8');
+    parts.push(Buffer.from([0x32]));
+    parts.push(encodeVarint(gameIdBytes.length));
+    parts.push(gameIdBytes);
     
-    // Field 2: Request metadata (nested message)
-    const metaParts = [];
+    // 7. bootState (field 7, varint)
+    parts.push(Buffer.from([0x38, 0x03]));
     
-    // Field 2.1: Timestamp (fixed64)
-    const timestamp = Date.now();
-    const timestampBuf = Buffer.allocUnsafe(8);
-    timestampBuf.writeBigUInt64LE(BigInt(timestamp));
-    metaParts.push(Buffer.from([0x09])); // field 1, wire type 1 (fixed64)
-    metaParts.push(timestampBuf);
+    // 8 & 9. version1 & version2 (field 8 & 9, submessage vg_version)
+    // vg_version: a=1, b=18, c=3, d=77
+    const vgVerParts = [];
+    vgVerParts.push(Buffer.from([0x08, 0x01]));  // a=1
+    vgVerParts.push(Buffer.from([0x10, 0x12]));  // b=18
+    vgVerParts.push(Buffer.from([0x18, 0x03]));  // c=3
+    vgVerParts.push(Buffer.from([0x20, 0x4D]));  // d=77 (0x4D = 77)
+    const vgVerMessage = Buffer.concat(vgVerParts);
     
-    // Field 2.2: Client type (varint) - 2 = game client
-    metaParts.push(Buffer.from([0x10, 0x02])); // field 2, value 2
+    parts.push(Buffer.from([0x42]));
+    parts.push(encodeVarint(vgVerMessage.length));
+    parts.push(vgVerMessage);
     
-    const metaMessage = Buffer.concat(metaParts);
-    parts.push(Buffer.from([0x12])); // field 2, wire type 2
-    parts.push(encodeVarint(metaMessage.length));
-    parts.push(metaMessage);
+    parts.push(Buffer.from([0x4A]));
+    parts.push(encodeVarint(vgVerMessage.length));
+    parts.push(vgVerMessage);
     
     return Buffer.concat(parts);
 }
