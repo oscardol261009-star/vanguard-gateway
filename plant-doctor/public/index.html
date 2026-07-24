@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1912">
+<title>🌱 Plant Doctor</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root {
+    --bg: #0d1912;
+    --card: #142219;
+    --line: #23372a;
+    --txt: #e6f2e9;
+    --dim: #8fae9c;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red: #f87171;
+  }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(120% 80% at 50% 0%, #16301f 0%, var(--bg) 60%);
+    color: var(--txt);
+    min-height: 100vh;
+    padding: 20px 16px calc(40px + env(safe-area-inset-bottom));
+  }
+  .wrap { max-width: 620px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 22px; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.5px; }
+  header p { margin: 0; color: var(--dim); font-size: 14px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+
+  .drop {
+    border: 2px dashed var(--line);
+    border-radius: 16px;
+    padding: 34px 16px;
+    text-align: center;
+    color: var(--dim);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--green); background: rgba(74,222,128,.06); }
+  .drop .emoji { font-size: 40px; display: block; margin-bottom: 8px; }
+  .drop b { color: var(--txt); display: block; margin-bottom: 4px; font-size: 16px; }
+
+  #preview { width: 100%; border-radius: 12px; display: block; margin-bottom: 12px; }
+
+  input[type=text] {
+    width: 100%; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: #0f1c14; color: var(--txt);
+    font-size: 15px; margin-bottom: 10px;
+  }
+  input[type=text]::placeholder { color: #5d7a68; }
+  input[type=text]:focus { outline: none; border-color: var(--green); }
+
+  button {
+    width: 100%; padding: 14px; border: none; border-radius: 12px;
+    background: var(--green); color: #05210f; font-size: 16px; font-weight: 700;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost {
+    background: transparent; border: 1px solid var(--line); color: var(--dim);
+    font-weight: 500; font-size: 14px; padding: 11px; margin-top: 8px;
+  }
+
+  .hidden { display: none !important; }
+
+  .spinner {
+    width: 26px; height: 26px; border: 3px solid var(--line);
+    border-top-color: var(--green); border-radius: 50%;
+    animation: spin .8s linear infinite; margin: 0 auto 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading { text-align: center; color: var(--dim); font-size: 14px; }
+
+  .species { font-size: 22px; font-weight: 700; margin: 0 0 2px; }
+  .latin { font-style: italic; color: var(--dim); font-size: 14px; margin: 0 0 12px; }
+
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .badge {
+    font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 999px;
+    background: rgba(255,255,255,.06); border: 1px solid var(--line);
+  }
+  .badge.bonne { color: var(--green); border-color: rgba(74,222,128,.4); }
+  .badge.moyenne { color: var(--amber); border-color: rgba(251,191,36,.4); }
+  .badge.mauvaise { color: var(--red); border-color: rgba(248,113,113,.4); }
+
+  .resume { line-height: 1.55; font-size: 15px; margin: 0 0 4px; }
+
+  h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px;
+       color: var(--dim); margin: 18px 0 8px; }
+
+  .pb { border-left: 3px solid var(--line); padding: 2px 0 2px 12px; margin-bottom: 12px; }
+  .pb.faible { border-color: var(--green); }
+  .pb.moyenne { border-color: var(--amber); }
+  .pb.elevee { border-color: var(--red); }
+  .pb .nom { font-weight: 700; margin-bottom: 3px; }
+  .pb .txt { font-size: 14px; color: #c5d9cc; line-height: 1.5; margin-bottom: 3px; }
+  .pb .txt span { color: var(--dim); }
+
+  ul.todo { margin: 0; padding-left: 18px; line-height: 1.6; font-size: 15px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { color: var(--dim); width: 108px; }
+  tr:last-child td { border-bottom: none; }
+
+  .err { color: var(--red); font-size: 14px; line-height: 1.5; }
+  .foot { text-align: center; color: #4f6a5a; font-size: 12px; margin-top: 22px; }
+
+  .hist { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .hist img { width: 62px; height: 62px; border-radius: 10px; object-fit: cover;
+              border: 1px solid var(--line); cursor: pointer; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🌱 Plant Doctor</h1>
+    <p>Photographie une plante, obtiens l'espèce, le diagnostic et les soins.</p>
+  </header>
+
+  <div class="card" id="pickCard">
+    <div class="drop" id="drop">
+      <span class="emoji">📷</span>
+      <b>Prendre une photo</b>
+      ou choisir une image dans la galerie
+    </div>
+    <input type="file" id="file" accept="image/*" capture="environment" class="hidden">
+  </div>
+
+  <div class="card hidden" id="shotCard">
+    <img id="preview" alt="Aperçu de la plante">
+    <input type="text" id="note" placeholder="Un détail à signaler ? (facultatif)" maxlength="200">
+    <button id="go">Analyser 🔍</button>
+    <button class="ghost" id="reset">Changer de photo</button>
+  </div>
+
+  <div class="card hidden" id="loadCard">
+    <div class="spinner"></div>
+    <div class="loading" id="loadTxt">Analyse en cours…</div>
+  </div>
+
+  <div class="card hidden" id="errCard"><div class="err" id="errTxt"></div></div>
+
+  <div class="card hidden" id="resCard"></div>
+
+  <div class="card hidden" id="histCard">
+    <h3 style="margin-top:0">Historique</h3>
+    <div class="hist" id="hist"></div>
+  </div>
+
+  <div class="foot">Analyse par IA — à confirmer pour toute plante consommée ou médicinale.</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const MAX_SIDE = 1400;
+let currentImage = null;
+
+/* ---------- sélection + compression de l'image ---------- */
+
+$('drop').onclick = () => $('file').click();
+$('file').onchange = (e) => { if (e.target.files[0]) load(e.target.files[0]); };
+
+['dragover', 'dragleave', 'drop'].forEach((ev) => {
+  $('drop').addEventListener(ev, (e) => {
+    e.preventDefault();
+    $('drop').classList.toggle('over', ev === 'dragover');
+    if (ev === 'drop' && e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+  });
+});
+
+function load(file) {
+  if (!file.type.startsWith('image/')) return showError("Ce fichier n'est pas une image.");
+  const reader = new FileReader();
+  reader.onload = () => shrink(reader.result);
+  reader.readAsDataURL(file);
+}
+
+// On redimensionne côté navigateur : upload plus rapide et on reste sous les 5 Mo.
+function shrink(dataUrl) {
+  const img = new Image();
+  img.onload = () => {
+    const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(img.width * scale);
+    cv.height = Math.round(img.height * scale);
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    currentImage = cv.toDataURL('image/jpeg', 0.85);
+    $('preview').src = currentImage;
+    hide('pickCard', 'errCard', 'resCard', 'histCard');
+    show('shotCard');
+  };
+  img.onerror = () => showError("Impossible de lire cette image.");
+  img.src = dataUrl;
+}
+
+$('reset').onclick = () => {
+  currentImage = null;
+  $('file').value = '';
+  hide('shotCard', 'resCard', 'errCard', 'loadCard');
+  show('pickCard');
+  renderHistory();
+};
+
+/* ---------- appel serveur ---------- */
+
+$('go').onclick = async () => {
+  if (!currentImage) return;
+  hide('shotCard', 'errCard', 'resCard', 'histCard');
+  show('loadCard');
+
+  const msgs = ['Analyse en cours…', 'Identification de l\'espèce…', 'Recherche de symptômes…', 'Rédaction des conseils…'];
+  let i = 0;
+  const tick = setInterval(() => { $('loadTxt').textContent = msgs[++i % msgs.length]; }, 3500);
+
+  try {
+    const r = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: currentImage, note: $('note').value }),
+    });
+    const data = await r.json();
+    clearInterval(tick);
+    hide('loadCard');
+    if (!r.ok) { showError(data.error || 'Erreur inconnue.'); show('shotCard'); return; }
+    render(data);
+    saveHistory(currentImage, data);
+  } catch (e) {
+    clearInterval(tick);
+    hide('loadCard');
+    show('shotCard');
+    showError('Connexion au serveur impossible : ' + e.message);
+  }
+};
+
+/* ---------- rendu ---------- */
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function render(d) {
+  if (d.est_une_plante === false) {
+    $('resCard').innerHTML = '<p class="species">🤔 Pas de plante détectée</p>'
+      + '<p class="resume">' + esc(d.resume) + '</p>';
+    show('resCard', 'shotCard');
+    return;
+  }
+
+  const probs = d.problemes || [];
+  let html = ''
+    + '<p class="species">' + esc(d.espece) + '</p>'
+    + '<p class="latin">' + esc(d.nom_latin) + '</p>'
+    + '<div class="badges">'
+    +   '<span class="badge ' + esc(d.etat_sante) + '">Santé : ' + esc(d.etat_sante) + '</span>'
+    +   '<span class="badge">Confiance ' + esc(d.confiance) + '%</span>'
+    +   (probs.length ? '<span class="badge">' + probs.length + ' problème' + (probs.length > 1 ? 's' : '') + '</span>'
+                      : '<span class="badge bonne">Aucun problème</span>')
+    + '</div>'
+    + '<p class="resume">' + esc(d.resume) + '</p>';
+
+  if (probs.length) {
+    html += '<h3>Diagnostic</h3>';
+    probs.forEach((p) => {
+      html += '<div class="pb ' + esc(p.gravite) + '">'
+        + '<div class="nom">' + esc(p.nom) + ' — gravité ' + esc(p.gravite) + '</div>'
+        + '<div class="txt"><span>Symptômes :</span> ' + esc(p.symptomes) + '</div>'
+        + '<div class="txt"><span>Traitement :</span> ' + esc(p.traitement) + '</div>'
+        + '</div>';
+    });
+  }
+
+  if ((d.actions_prioritaires || []).length) {
+    html += '<h3>À faire maintenant</h3><ul class="todo">'
+      + d.actions_prioritaires.map((a) => '<li>' + esc(a) + '</li>').join('')
+      + '</ul>';
+  }
+
+  const e = d.entretien || {};
+  html += '<h3>Entretien</h3><table>'
+    + '<tr><td>☀️ Lumière</td><td>' + esc(e.lumiere) + '</td></tr>'
+    + '<tr><td>💧 Arrosage</td><td>' + esc(e.arrosage) + '</td></tr>'
+    + '<tr><td>🪴 Sol</td><td>' + esc(e.sol) + '</td></tr>'
+    + '<tr><td>🌡️ Température</td><td>' + esc(e.temperature) + '</td></tr>'
+    + '<tr><td>🧪 Engrais</td><td>' + esc(e.engrais) + '</td></tr>'
+    + '<tr><td>🐾 Animaux</td><td>' + esc(d.toxique_animaux) + '</td></tr>'
+    + '</table>';
+
+  $('resCard').innerHTML = html;
+  show('resCard', 'shotCard');
+  $('resCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function showError(msg) {
+  $('errTxt').textContent = msg;
+  show('errCard');
+}
+
+function show() { [...arguments].forEach((id) => $(id).classList.remove('hidden')); }
+function hide() { [...arguments].forEach((id) => $(id).classList.add('hidden')); }
+
+/* ---------- historique local ---------- */
+
+const KEY = 'plant-doctor-history';
+
+function saveHistory(thumbSrc, data) {
+  try {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 140;
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(img.width, img.height);
+      cv.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 140, 140);
+      const list = readHistory();
+      list.unshift({ thumb: cv.toDataURL('image/jpeg', 0.6), data, at: Date.now() });
+      localStorage.setItem(KEY, JSON.stringify(list.slice(0, 12)));
+    };
+    img.src = thumbSrc;
+  } catch (e) { /* quota plein : pas grave */ }
+}
+
+function readHistory() {
+  try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; }
+}
+
+function renderHistory() {
+  const list = readHistory();
+  if (!list.length) return hide('histCard');
+  $('hist').innerHTML = '';
+  list.forEach((it, i) => {
+    const im = new Image();
+    im.src = it.thumb;
+    im.title = it.data.espece || '';
+    im.onclick = () => {
+      currentImage = it.thumb;
+      $('preview').src = it.thumb;
+      hide('pickCard', 'errCard');
+      show('shotCard');
+      render(it.data);
+    };
+    $('hist').appendChild(im);
+  });
+  show('histCard');
+}
+
+renderHistory();
+</script>
+</body>
+</html>
