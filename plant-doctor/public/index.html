@@ -152,6 +152,19 @@
   .err { color: var(--red); font-size: 14px; line-height: 1.5; }
   .foot { text-align: center; color: #4f6a5a; font-size: 12px; margin-top: 22px; }
 
+  /* ---------- carte 3D ---------- */
+  .c3d-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .mini {
+    background: transparent; border: 1px solid var(--line); color: var(--dim);
+    font-size: 12px; padding: 6px 11px; border-radius: 999px; cursor: pointer;
+  }
+  #card3d {
+    width: 100%; aspect-ratio: 1 / 1; display: block; touch-action: none; cursor: grab;
+    background: radial-gradient(60% 60% at 50% 45%, rgba(74,222,128,.10), transparent 70%);
+  }
+  #card3d:active { cursor: grabbing; }
+  .c3d-tip { text-align: center; color: #4f6a5a; font-size: 12px; margin-top: 2px; }
+
   .hist { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
   .hist img { width: 62px; height: 62px; border-radius: 10px; object-fit: cover;
               border: 1px solid var(--line); cursor: pointer; flex: 0 0 auto; }
@@ -195,6 +208,15 @@
 
   <div class="card hidden" id="resCard"></div>
 
+  <div class="card hidden" id="card3dCard">
+    <div class="c3d-head">
+      <h3 style="margin:0">Carte 3D</h3>
+      <button class="mini" id="flipBtn">Retourner ↻</button>
+    </div>
+    <canvas id="card3d"></canvas>
+    <div class="c3d-tip">Fais-la tourner avec le doigt — la fiche est au dos.</div>
+  </div>
+
   <div class="card hidden" id="againCard">
     <button class="wide" id="again">Nouvelle photo 📷</button>
   </div>
@@ -213,6 +235,7 @@
   <div class="foot">Analyse par IA — à confirmer pour toute plante consommée ou médicinale.</div>
 </div>
 
+<script src="card3d.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const MAX_SIDE = 1400;
@@ -328,7 +351,8 @@ async function analyze(dataUrl) {
   show('camCard');
   hide('fallbackCard');
   show('frozen', 'scanline', 'veil');
-  hide('video', 'controls', 'reticle', 'hint', 'errCard', 'resCard', 'histCard', 'againCard', 'noteCard');
+  hide('video', 'controls', 'reticle', 'hint', 'errCard', 'resCard', 'histCard', 'againCard', 'noteCard', 'card3dCard');
+  destroyCard3d();
   stopCamera();
 
   const msgs = ['Analyse en cours…', "Identification de l'espèce…", 'Recherche de symptômes…', 'Rédaction des conseils…'];
@@ -356,7 +380,8 @@ async function analyze(dataUrl) {
 }
 
 $('again').onclick = () => {
-  hide('againCard', 'resCard', 'errCard', 'frozen');
+  destroyCard3d();
+  hide('againCard', 'resCard', 'errCard', 'frozen', 'card3dCard');
   show('video', 'controls', 'reticle', 'hint', 'noteCard');
   renderHistory();
   startCamera();
@@ -418,8 +443,41 @@ function render(d) {
 
   $('resCard').innerHTML = html;
   show('resCard');
+  showCard3d(d);
   $('resCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+
+/* ---------- carte 3D ---------- */
+
+let card3d = null;
+
+function destroyCard3d() {
+  if (card3d) { card3d.destroy(); card3d = null; }
+}
+
+function showCard3d(data) {
+  destroyCard3d();
+  if (!currentImage || !global3d()) return hide('card3dCard');
+  try {
+    card3d = window.PlantCard3D.mount($('card3d'), currentImage, data);
+  } catch (e) {
+    card3d = null;
+  }
+  if (card3d) show('card3dCard'); else hide('card3dCard');
+}
+
+// WebGL absent (vieux navigateur, accélération désactivée) -> on saute la 3D
+function global3d() {
+  if (!window.PlantCard3D) return false;
+  try {
+    const c = document.createElement('canvas');
+    return !!(c.getContext('webgl') || c.getContext('experimental-webgl'));
+  } catch (e) {
+    return false;
+  }
+}
+
+$('flipBtn').onclick = () => { if (card3d) card3d.flip(); };
 
 function showError(msg) {
   $('errTxt').textContent = msg;
@@ -462,6 +520,7 @@ function renderHistory() {
     im.src = it.thumb;
     im.title = (it.data && it.data.espece) || '';
     im.onclick = () => {
+      currentImage = it.thumb;
       $('frozen').src = it.thumb;
       show('frozen', 'againCard');
       hide('video', 'controls', 'reticle', 'hint');

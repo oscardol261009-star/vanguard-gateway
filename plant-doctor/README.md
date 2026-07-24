@@ -155,11 +155,29 @@ plant-doctor/
 ├── server.js          # Express + appel vision Gemini (REST, fetch natif)
 ├── package.json       # une seule dépendance : express
 ├── public/
-│   └── index.html     # front mobile (caméra, aperçu, résultats, historique)
+│   ├── index.html     # front mobile (caméra live, résultats, historique)
+│   └── card3d.js      # carte 3D texturée en WebGL, sans librairie
 └── README.md
 ```
 
 L'historique des 12 dernières analyses est stocké en `localStorage`, côté téléphone.
+
+### Caméra live
+
+La page ouvre directement le flux de la caméra arrière (`getUserMedia`) : on vise,
+on appuie sur le déclencheur, l'analyse part toute seule. La caméra est relâchée
+pendant l'analyse et quand l'onglet passe en arrière-plan.
+
+⚠️ `getUserMedia` **exige HTTPS** (Render le fournit) ou `localhost`. Sinon la page
+affiche un message clair et bascule sur l'envoi d'un fichier.
+
+### Carte 3D
+
+Après chaque analyse, la photo devient une plaque en volume qu'on fait tourner au
+doigt : face avant la photo, face arrière une fiche générée au vol (espèce, état,
+entretien), avec tranches éclairées et inertie. C'est du WebGL brut — pas de
+Three.js, pas de CDN. Si le navigateur n'a pas WebGL, la carte est simplement
+masquée, le reste marche.
 
 ---
 
