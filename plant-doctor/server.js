@@ -2,26 +2,28 @@
  * 🌱 Plant Doctor - serveur d'analyse de plantes par photo
  *
  * Tu prends une photo d'une feuille / d'une plante, le serveur l'envoie a
- * l'API Claude (vision) et renvoie : espece, etat de sante, maladies
+ * l'API Google Gemini (vision) et renvoie : espece, etat de sante, maladies
  * detectees, traitement et conseils d'entretien.
+ *
+ * Pas de SDK : l'API REST est appelee avec le fetch natif de Node 18+.
  */
 
 const express = require('express');
 const path = require('path');
-const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MODEL = process.env.PLANT_DOCTOR_MODEL || 'claude-opus-4-8';
+const MODEL = process.env.PLANT_DOCTOR_MODEL || 'gemini-2.5-flash';
+const API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 // Les photos arrivent en base64 -> il faut une limite de body genereuse
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-const client = new Anthropic(); // lit ANTHROPIC_API_KEY dans l'environnement
-
-const MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // limite de l'API pour une image
+const MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const TIMEOUT_MS = 90000;
 
 const stats = {
   startedAt: Date.now(),
@@ -29,65 +31,68 @@ const stats = {
   erreurs: 0,
 };
 
-/** Schema de la reponse : Claude est force de repondre exactement comme ca. */
+/**
+ * Schema de la reponse : Gemini est force de repondre exactement comme ca.
+ * Sous-ensemble OpenAPI accepte par l'API -> pas de additionalProperties ici.
+ */
 const PLANT_SCHEMA = {
-  type: 'object',
+  type: 'OBJECT',
   properties: {
     est_une_plante: {
-      type: 'boolean',
+      type: 'BOOLEAN',
       description: "true si l'image contient bien une plante",
     },
     espece: {
-      type: 'string',
+      type: 'STRING',
       description: 'Nom commun en francais, ou "Inconnue" si impossible a determiner',
     },
-    nom_latin: { type: 'string' },
+    nom_latin: { type: 'STRING' },
     confiance: {
-      type: 'integer',
+      type: 'INTEGER',
       description: "Confiance de l'identification, de 0 a 100",
     },
     etat_sante: {
-      type: 'string',
+      type: 'STRING',
       enum: ['bonne', 'moyenne', 'mauvaise', 'inconnu'],
     },
     resume: {
-      type: 'string',
+      type: 'STRING',
       description: 'Deux ou trois phrases qui resument ce que tu vois',
     },
     problemes: {
-      type: 'array',
+      type: 'ARRAY',
       description: 'Maladies, carences, parasites ou erreurs de culture reperes',
       items: {
-        type: 'object',
+        type: 'OBJECT',
         properties: {
-          nom: { type: 'string' },
-          gravite: { type: 'string', enum: ['faible', 'moyenne', 'elevee'] },
-          symptomes: { type: 'string' },
-          traitement: { type: 'string' },
+          nom: { type: 'STRING' },
+          gravite: { type: 'STRING', enum: ['faible', 'moyenne', 'elevee'] },
+          symptomes: { type: 'STRING' },
+          traitement: { type: 'STRING' },
         },
         required: ['nom', 'gravite', 'symptomes', 'traitement'],
-        additionalProperties: false,
+        propertyOrdering: ['nom', 'gravite', 'symptomes', 'traitement'],
       },
     },
     entretien: {
-      type: 'object',
+      type: 'OBJECT',
       properties: {
-        lumiere: { type: 'string' },
-        arrosage: { type: 'string' },
-        sol: { type: 'string' },
-        temperature: { type: 'string' },
-        engrais: { type: 'string' },
+        lumiere: { type: 'STRING' },
+        arrosage: { type: 'STRING' },
+        sol: { type: 'STRING' },
+        temperature: { type: 'STRING' },
+        engrais: { type: 'STRING' },
       },
       required: ['lumiere', 'arrosage', 'sol', 'temperature', 'engrais'],
-      additionalProperties: false,
+      propertyOrdering: ['lumiere', 'arrosage', 'sol', 'temperature', 'engrais'],
     },
     actions_prioritaires: {
-      type: 'array',
+      type: 'ARRAY',
       description: 'Les 1 a 3 choses a faire tout de suite',
-      items: { type: 'string' },
+      items: { type: 'STRING' },
     },
     toxique_animaux: {
-      type: 'string',
+      type: 'STRING',
       description: 'Toxicite pour chats/chiens, ou "inconnu"',
     },
   },
@@ -103,7 +108,18 @@ const PLANT_SCHEMA = {
     'actions_prioritaires',
     'toxique_animaux',
   ],
-  additionalProperties: false,
+  propertyOrdering: [
+    'est_une_plante',
+    'espece',
+    'nom_latin',
+    'confiance',
+    'etat_sante',
+    'resume',
+    'problemes',
+    'entretien',
+    'actions_prioritaires',
+    'toxique_animaux',
+  ],
 };
 
 const SYSTEM_PROMPT = `Tu es botaniste et phytopathologiste. On te montre la photo d'une plante.
@@ -140,7 +156,7 @@ function parseImage(payload) {
   data = data.replace(/\s/g, '');
 
   if (!MEDIA_TYPES.includes(mediaType)) {
-    return { error: `Format non supporte (${mediaType}). Utilise JPEG, PNG, WebP ou GIF.` };
+    return { error: `Format non supporte (${mediaType}). Utilise JPEG, PNG, WebP ou HEIC.` };
   }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
     return { error: "L'image n'est pas du base64 valide." };
@@ -154,12 +170,35 @@ function parseImage(payload) {
   return { mediaType, data };
 }
 
+/** Traduit une erreur HTTP de l'API en message clair + code a renvoyer au front. */
+function mapApiError(status, body) {
+  const message = (body && body.error && body.error.message) || `HTTP ${status}`;
+
+  if (status === 400 && /API key not valid|API_KEY_INVALID/i.test(message)) {
+    return { code: 500, error: 'Cle API Gemini invalide. Verifie GEMINI_API_KEY sur Render.' };
+  }
+  if (status === 401 || status === 403) {
+    return { code: 500, error: `Acces refuse par Google : ${message}` };
+  }
+  if (status === 429) {
+    return {
+      code: 429,
+      error: 'Quota Gemini atteint. Attends une minute (le palier gratuit est limite par minute).',
+    };
+  }
+  if (status === 400) {
+    return { code: 400, error: `Requete refusee par Gemini : ${message}` };
+  }
+  return { code: 502, error: `Erreur API Gemini : ${message}` };
+}
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'plant-doctor',
+    moteur: 'gemini',
     model: MODEL,
-    apiKey: process.env.ANTHROPIC_API_KEY ? 'configuree' : 'MANQUANTE',
+    apiKey: API_KEY ? 'configuree' : 'MANQUANTE',
     uptime: Math.floor((Date.now() - stats.startedAt) / 1000),
     analyses: stats.analyses,
     erreurs: stats.erreurs,
@@ -167,10 +206,10 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/api/analyze', async (req, res) => {
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!API_KEY) {
     return res.status(500).json({
-      error: "ANTHROPIC_API_KEY n'est pas configuree sur le serveur.",
-      hint: 'Ajoute la variable d\'environnement dans Render (Environment > Add Environment Variable).',
+      error: "GEMINI_API_KEY n'est pas configuree sur le serveur.",
+      hint: "Ajoute la variable d'environnement dans Render (Environment > Add Environment Variable).",
     });
   }
 
@@ -180,46 +219,78 @@ app.post('/api/analyze', async (req, res) => {
   }
 
   const note = typeof req.body.note === 'string' ? req.body.note.slice(0, 500).trim() : '';
-
   const question = note
     ? `Analyse cette plante. Contexte donne par l'utilisateur : "${note}"`
     : 'Analyse cette plante.';
 
   const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 4000,
-      system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: parsed.mediaType,
-                data: parsed.data,
-              },
-            },
-            { type: 'text', text: question },
-          ],
-        },
-      ],
-      output_config: {
-        format: {
-          type: 'json_schema',
-          schema: PLANT_SCHEMA,
-        },
+    const apiRes = await fetch(`${API_BASE}/${encodeURIComponent(MODEL)}:generateContent`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': API_KEY,
       },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: parsed.mediaType, data: parsed.data } },
+              { text: question },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: PLANT_SCHEMA,
+          maxOutputTokens: 8192,
+          temperature: 0.3,
+        },
+      }),
     });
 
-    const text = response.content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
+    const body = await apiRes.json().catch(() => null);
+
+    if (!apiRes.ok) {
+      stats.erreurs++;
+      console.error('[PLANT] Erreur API:', apiRes.status, JSON.stringify(body).slice(0, 400));
+      const mapped = mapApiError(apiRes.status, body);
+      return res.status(mapped.code).json({ error: mapped.error });
+    }
+
+    const candidate = body && body.candidates && body.candidates[0];
+
+    if (!candidate) {
+      stats.erreurs++;
+      const blocked = body && body.promptFeedback && body.promptFeedback.blockReason;
+      console.error('[PLANT] Pas de candidat:', JSON.stringify(body).slice(0, 400));
+      return res.status(502).json({
+        error: blocked
+          ? `Image refusee par les filtres de securite (${blocked}).`
+          : "Gemini n'a rien renvoye, reessaie.",
+      });
+    }
+
+    const text = ((candidate.content && candidate.content.parts) || [])
+      .map((part) => part.text || '')
       .join('');
+
+    if (!text) {
+      stats.erreurs++;
+      console.error('[PLANT] Reponse vide, finishReason =', candidate.finishReason);
+      return res.status(502).json({
+        error:
+          candidate.finishReason === 'MAX_TOKENS'
+            ? 'Reponse coupee (trop longue). Reessaie avec une photo plus simple.'
+            : `Reponse vide du modele (${candidate.finishReason || 'raison inconnue'}).`,
+      });
+    }
 
     let result;
     try {
@@ -227,48 +298,43 @@ app.post('/api/analyze', async (req, res) => {
     } catch (e) {
       stats.erreurs++;
       console.error('[PLANT] Reponse non parsable:', text.slice(0, 500));
-      return res.status(502).json({ error: "Reponse illisible du modele, reessaie." });
+      return res.status(502).json({ error: 'Reponse illisible du modele, reessaie.' });
     }
 
     stats.analyses++;
     const ms = Date.now() - started;
+    const nbProblemes = (result.problemes || []).length;
     console.log(
-      `[PLANT] ${result.espece} | sante=${result.etat_sante} | ${result.problemes.length} probleme(s) | ${ms}ms`
+      `[PLANT] ${result.espece} | sante=${result.etat_sante} | ${nbProblemes} probleme(s) | ${ms}ms`
     );
 
     res.json({
       ...result,
+      problemes: result.problemes || [],
+      actions_prioritaires: result.actions_prioritaires || [],
       meta: {
+        moteur: 'gemini',
         model: MODEL,
         duree_ms: ms,
-        tokens: response.usage,
+        tokens: body.usageMetadata,
       },
     });
   } catch (err) {
     stats.erreurs++;
-    console.error('[PLANT] Erreur API:', err.message);
-
-    if (err instanceof Anthropic.AuthenticationError) {
-      return res.status(500).json({ error: 'Cle API invalide ou expiree.' });
+    if (err.name === 'AbortError') {
+      console.error('[PLANT] Timeout apres', TIMEOUT_MS, 'ms');
+      return res.status(504).json({ error: 'Le modele a mis trop de temps a repondre, reessaie.' });
     }
-    if (err instanceof Anthropic.RateLimitError) {
-      return res.status(429).json({ error: 'Trop de requetes, attends quelques secondes.' });
-    }
-    if (err instanceof Anthropic.BadRequestError) {
-      return res.status(400).json({ error: `Requete refusee par l'API : ${err.message}` });
-    }
-    if (err instanceof Anthropic.APIError) {
-      return res.status(502).json({ error: `Erreur API Claude : ${err.message}` });
-    }
+    console.error('[PLANT] Erreur:', err.message);
     res.status(500).json({ error: 'Erreur interne du serveur.' });
+  } finally {
+    clearTimeout(timer);
   }
 });
 
 app.listen(PORT, () => {
   console.log('🌱 Plant Doctor');
   console.log(`   http://localhost:${PORT}`);
-  console.log(`   modele : ${MODEL}`);
-  console.log(
-    `   cle API : ${process.env.ANTHROPIC_API_KEY ? 'OK' : 'MANQUANTE (export ANTHROPIC_API_KEY=...)'}`
-  );
+  console.log(`   modele : ${MODEL} (Google Gemini)`);
+  console.log(`   cle API : ${API_KEY ? 'OK' : 'MANQUANTE (export GEMINI_API_KEY=...)'}`);
 });
