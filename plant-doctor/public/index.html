@@ -23,12 +23,12 @@
     background: radial-gradient(120% 80% at 50% 0%, #16301f 0%, var(--bg) 60%);
     color: var(--txt);
     min-height: 100vh;
-    padding: 20px 16px calc(40px + env(safe-area-inset-bottom));
+    padding: 18px 16px calc(40px + env(safe-area-inset-bottom));
   }
   .wrap { max-width: 620px; margin: 0 auto; }
-  header { text-align: center; margin-bottom: 22px; }
-  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.5px; }
-  header p { margin: 0; color: var(--dim); font-size: 14px; }
+  header { text-align: center; margin-bottom: 18px; }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.5px; }
+  header p { margin: 0; color: var(--dim); font-size: 13px; }
 
   .card {
     background: var(--card);
@@ -37,50 +37,85 @@
     padding: 16px;
     margin-bottom: 14px;
   }
+  .card.flush { padding: 0; overflow: hidden; }
 
-  .drop {
-    border: 2px dashed var(--line);
-    border-radius: 16px;
-    padding: 34px 16px;
-    text-align: center;
-    color: var(--dim);
-    cursor: pointer;
-    transition: border-color .15s, background .15s;
+  /* ---------- vue caméra live ---------- */
+  .stage { position: relative; background: #000; aspect-ratio: 3 / 4; }
+  .stage video, .stage img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .reticle {
+    position: absolute; inset: 12% 10%; border: 2px solid rgba(255,255,255,.35);
+    border-radius: 18px; pointer-events: none;
+    box-shadow: 0 0 0 2000px rgba(0,0,0,.18);
   }
-  .drop:hover, .drop.over { border-color: var(--green); background: rgba(74,222,128,.06); }
-  .drop .emoji { font-size: 40px; display: block; margin-bottom: 8px; }
-  .drop b { color: var(--txt); display: block; margin-bottom: 4px; font-size: 16px; }
+  .hint {
+    position: absolute; top: 12px; left: 0; right: 0; text-align: center;
+    font-size: 12px; color: #fff; text-shadow: 0 1px 4px #000; pointer-events: none;
+  }
 
-  #preview { width: 100%; border-radius: 12px; display: block; margin-bottom: 12px; }
+  .controls {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(0,0,0,.65), transparent);
+  }
+  .shutter {
+    width: 68px; height: 68px; border-radius: 50%; border: 4px solid rgba(255,255,255,.9);
+    background: var(--green); padding: 0; flex: 0 0 auto; cursor: pointer;
+    box-shadow: 0 4px 18px rgba(0,0,0,.5);
+  }
+  .shutter:active { transform: scale(.93); }
+  .icon-btn {
+    width: 44px; height: 44px; border-radius: 50%; border: 1px solid rgba(255,255,255,.25);
+    background: rgba(0,0,0,.45); color: #fff; font-size: 19px; padding: 0;
+    flex: 0 0 auto; cursor: pointer;
+  }
+
+  .flash {
+    position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none;
+  }
+  .flash.on { animation: pop .35s ease-out; }
+  @keyframes pop { from { opacity: .85; } to { opacity: 0; } }
+
+  .scanline {
+    position: absolute; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, transparent, var(--green), transparent);
+    box-shadow: 0 0 14px var(--green); animation: scan 1.7s ease-in-out infinite;
+  }
+  @keyframes scan { 0%,100% { top: 6%; } 50% { top: 92%; } }
+
+  .veil {
+    position: absolute; inset: 0; background: rgba(5,15,9,.55);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; font-size: 14px; color: #fff; text-shadow: 0 1px 4px #000;
+  }
 
   input[type=text] {
     width: 100%; padding: 12px 14px; border-radius: 10px;
     border: 1px solid var(--line); background: #0f1c14; color: var(--txt);
-    font-size: 15px; margin-bottom: 10px;
+    font-size: 15px;
   }
   input[type=text]::placeholder { color: #5d7a68; }
   input[type=text]:focus { outline: none; border-color: var(--green); }
 
-  button {
+  button.wide {
     width: 100%; padding: 14px; border: none; border-radius: 12px;
     background: var(--green); color: #05210f; font-size: 16px; font-weight: 700;
     cursor: pointer;
   }
-  button:disabled { opacity: .5; cursor: default; }
   button.ghost {
-    background: transparent; border: 1px solid var(--line); color: var(--dim);
-    font-weight: 500; font-size: 14px; padding: 11px; margin-top: 8px;
+    width: 100%; background: transparent; border: 1px solid var(--line); color: var(--dim);
+    font-weight: 500; font-size: 14px; padding: 11px; border-radius: 12px;
+    margin-top: 8px; cursor: pointer;
   }
 
   .hidden { display: none !important; }
 
   .spinner {
-    width: 26px; height: 26px; border: 3px solid var(--line);
-    border-top-color: var(--green); border-radius: 50%;
-    animation: spin .8s linear infinite; margin: 0 auto 10px;
+    width: 26px; height: 26px; border: 3px solid rgba(255,255,255,.25);
+    border-top-color: var(--green); border-radius: 50%; animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .loading { text-align: center; color: var(--dim); font-size: 14px; }
 
   .species { font-size: 22px; font-weight: 700; margin: 0 0 2px; }
   .latin { font-style: italic; color: var(--dim); font-size: 14px; margin: 0 0 12px; }
@@ -126,38 +161,54 @@
 <div class="wrap">
   <header>
     <h1>🌱 Plant Doctor</h1>
-    <p>Photographie une plante, obtiens l'espèce, le diagnostic et les soins.</p>
+    <p>Vise une plante, appuie sur le bouton, tu as le diagnostic.</p>
   </header>
 
-  <div class="card" id="pickCard">
-    <div class="drop" id="drop">
-      <span class="emoji">📷</span>
-      <b>Prendre une photo</b>
-      ou choisir une image dans la galerie
+  <!-- Caméra live -->
+  <div class="card flush" id="camCard">
+    <div class="stage">
+      <video id="video" playsinline autoplay muted></video>
+      <img id="frozen" class="hidden" alt="Photo prise">
+      <div class="reticle" id="reticle"></div>
+      <div class="hint" id="hint">Cadre une feuille bien éclairée</div>
+      <div class="scanline hidden" id="scanline"></div>
+      <div class="veil hidden" id="veil">
+        <div class="spinner"></div>
+        <div id="veilTxt">Analyse en cours…</div>
+      </div>
+      <div class="flash" id="flash"></div>
+      <div class="controls" id="controls">
+        <button class="icon-btn" id="switchBtn" title="Changer de caméra">🔄</button>
+        <button class="shutter" id="shutter" title="Prendre la photo"></button>
+        <button class="icon-btn" id="galleryBtn" title="Choisir une image">🖼️</button>
+      </div>
     </div>
-    <input type="file" id="file" accept="image/*" capture="environment" class="hidden">
   </div>
 
-  <div class="card hidden" id="shotCard">
-    <img id="preview" alt="Aperçu de la plante">
-    <input type="text" id="note" placeholder="Un détail à signaler ? (facultatif)" maxlength="200">
-    <button id="go">Analyser 🔍</button>
-    <button class="ghost" id="reset">Changer de photo</button>
-  </div>
-
-  <div class="card hidden" id="loadCard">
-    <div class="spinner"></div>
-    <div class="loading" id="loadTxt">Analyse en cours…</div>
+  <!-- Repli si la caméra est refusée / indisponible -->
+  <div class="card hidden" id="fallbackCard">
+    <div class="err" id="fallbackTxt" style="margin-bottom:12px"></div>
+    <button class="wide" id="fallbackPick">Choisir une photo 🖼️</button>
   </div>
 
   <div class="card hidden" id="errCard"><div class="err" id="errTxt"></div></div>
 
   <div class="card hidden" id="resCard"></div>
 
+  <div class="card hidden" id="againCard">
+    <button class="wide" id="again">Nouvelle photo 📷</button>
+  </div>
+
+  <div class="card" id="noteCard">
+    <input type="text" id="note" placeholder="Un détail à signaler ? (facultatif)" maxlength="200">
+  </div>
+
   <div class="card hidden" id="histCard">
     <h3 style="margin-top:0">Historique</h3>
     <div class="hist" id="hist"></div>
   </div>
+
+  <input type="file" id="file" accept="image/*" class="hidden">
 
   <div class="foot">Analyse par IA — à confirmer pour toute plante consommée ou médicinale.</div>
 </div>
@@ -165,83 +216,150 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const MAX_SIDE = 1400;
+
+let stream = null;
+let facing = 'environment';
 let currentImage = null;
+let busy = false;
 
-/* ---------- sélection + compression de l'image ---------- */
+/* ---------- caméra live ---------- */
 
-$('drop').onclick = () => $('file').click();
-$('file').onchange = (e) => { if (e.target.files[0]) load(e.target.files[0]); };
-
-['dragover', 'dragleave', 'drop'].forEach((ev) => {
-  $('drop').addEventListener(ev, (e) => {
-    e.preventDefault();
-    $('drop').classList.toggle('over', ev === 'dragover');
-    if (ev === 'drop' && e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
-  });
-});
-
-function load(file) {
-  if (!file.type.startsWith('image/')) return showError("Ce fichier n'est pas une image.");
-  const reader = new FileReader();
-  reader.onload = () => shrink(reader.result);
-  reader.readAsDataURL(file);
+async function startCamera() {
+  stopCamera();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    $('video').srcObject = stream;
+    await $('video').play();
+    show('camCard');
+    hide('fallbackCard');
+  } catch (e) {
+    handleCameraError(e);
+  }
 }
 
-// On redimensionne côté navigateur : upload plus rapide et on reste sous les 5 Mo.
-function shrink(dataUrl) {
-  const img = new Image();
-  img.onload = () => {
-    const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
-    const cv = document.createElement('canvas');
-    cv.width = Math.round(img.width * scale);
-    cv.height = Math.round(img.height * scale);
-    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-    currentImage = cv.toDataURL('image/jpeg', 0.85);
-    $('preview').src = currentImage;
-    hide('pickCard', 'errCard', 'resCard', 'histCard');
-    show('shotCard');
-  };
-  img.onerror = () => showError("Impossible de lire cette image.");
-  img.src = dataUrl;
+function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+  }
 }
 
-$('reset').onclick = () => {
-  currentImage = null;
-  $('file').value = '';
-  hide('shotCard', 'resCard', 'errCard', 'loadCard');
-  show('pickCard');
-  renderHistory();
+function handleCameraError(e) {
+  const secure = window.isSecureContext;
+  let msg;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg = "Ce navigateur ne donne pas accès à la caméra.";
+  } else if (!secure) {
+    msg = "La caméra ne marche qu'en HTTPS. Ouvre l'adresse en https:// (ou localhost).";
+  } else if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) {
+    msg = "Accès caméra refusé. Autorise-le dans les réglages du site, puis recharge la page.";
+  } else if (e && e.name === 'NotFoundError') {
+    msg = "Aucune caméra détectée sur cet appareil.";
+  } else {
+    msg = 'Caméra indisponible' + (e && e.message ? ' : ' + e.message : '') + '.';
+  }
+  $('fallbackTxt').textContent = msg + " Tu peux quand même envoyer une photo depuis tes fichiers.";
+  hide('camCard');
+  show('fallbackCard');
+}
+
+$('switchBtn').onclick = () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  startCamera();
 };
 
-/* ---------- appel serveur ---------- */
+/* ---------- capture ---------- */
 
-$('go').onclick = async () => {
-  if (!currentImage) return;
-  hide('shotCard', 'errCard', 'resCard', 'histCard');
-  show('loadCard');
+$('shutter').onclick = () => {
+  if (busy || !stream) return;
+  const video = $('video');
+  if (!video.videoWidth) return;
 
-  const msgs = ['Analyse en cours…', 'Identification de l\'espèce…', 'Recherche de symptômes…', 'Rédaction des conseils…'];
+  $('flash').classList.remove('on');
+  void $('flash').offsetWidth; // relance l'animation
+  $('flash').classList.add('on');
+
+  const scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(video.videoWidth * scale);
+  cv.height = Math.round(video.videoHeight * scale);
+  cv.getContext('2d').drawImage(video, 0, 0, cv.width, cv.height);
+
+  analyze(cv.toDataURL('image/jpeg', 0.85));
+};
+
+/* ---------- repli fichier ---------- */
+
+$('galleryBtn').onclick = () => $('file').click();
+$('fallbackPick').onclick = () => $('file').click();
+$('file').onchange = (e) => { if (e.target.files[0]) loadFile(e.target.files[0]); };
+
+function loadFile(file) {
+  if (!file.type.startsWith('image/')) return showError("Ce fichier n'est pas une image.");
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * scale);
+      cv.height = Math.round(img.height * scale);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      analyze(cv.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = () => showError('Impossible de lire cette image.');
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+  $('file').value = '';
+}
+
+/* ---------- analyse ---------- */
+
+async function analyze(dataUrl) {
+  busy = true;
+  currentImage = dataUrl;
+
+  // On gèle l'image dans le cadre pendant l'analyse
+  $('frozen').src = dataUrl;
+  show('camCard');
+  hide('fallbackCard');
+  show('frozen', 'scanline', 'veil');
+  hide('video', 'controls', 'reticle', 'hint', 'errCard', 'resCard', 'histCard', 'againCard', 'noteCard');
+  stopCamera();
+
+  const msgs = ['Analyse en cours…', "Identification de l'espèce…", 'Recherche de symptômes…', 'Rédaction des conseils…'];
   let i = 0;
-  const tick = setInterval(() => { $('loadTxt').textContent = msgs[++i % msgs.length]; }, 3500);
+  const tick = setInterval(() => { $('veilTxt').textContent = msgs[++i % msgs.length]; }, 3500);
 
   try {
     const r = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: currentImage, note: $('note').value }),
+      body: JSON.stringify({ image: dataUrl, note: $('note').value }),
     });
     const data = await r.json();
-    clearInterval(tick);
-    hide('loadCard');
-    if (!r.ok) { showError(data.error || 'Erreur inconnue.'); show('shotCard'); return; }
+    if (!r.ok) throw new Error(data.error || 'Erreur inconnue.');
     render(data);
-    saveHistory(currentImage, data);
+    saveHistory(dataUrl, data);
   } catch (e) {
+    showError(e.message === 'Failed to fetch' ? 'Serveur injoignable. Vérifie ta connexion.' : e.message);
+  } finally {
     clearInterval(tick);
-    hide('loadCard');
-    show('shotCard');
-    showError('Connexion au serveur impossible : ' + e.message);
+    hide('scanline', 'veil');
+    show('againCard');
+    busy = false;
   }
+}
+
+$('again').onclick = () => {
+  hide('againCard', 'resCard', 'errCard', 'frozen');
+  show('video', 'controls', 'reticle', 'hint', 'noteCard');
+  renderHistory();
+  startCamera();
 };
 
 /* ---------- rendu ---------- */
@@ -255,7 +373,7 @@ function render(d) {
   if (d.est_une_plante === false) {
     $('resCard').innerHTML = '<p class="species">🤔 Pas de plante détectée</p>'
       + '<p class="resume">' + esc(d.resume) + '</p>';
-    show('resCard', 'shotCard');
+    show('resCard');
     return;
   }
 
@@ -299,7 +417,7 @@ function render(d) {
     + '</table>';
 
   $('resCard').innerHTML = html;
-  show('resCard', 'shotCard');
+  show('resCard');
   $('resCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -315,7 +433,7 @@ function hide() { [...arguments].forEach((id) => $(id).classList.add('hidden'));
 
 const KEY = 'plant-doctor-history';
 
-function saveHistory(thumbSrc, data) {
+function saveHistory(src, data) {
   try {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 140;
@@ -327,7 +445,7 @@ function saveHistory(thumbSrc, data) {
       list.unshift({ thumb: cv.toDataURL('image/jpeg', 0.6), data, at: Date.now() });
       localStorage.setItem(KEY, JSON.stringify(list.slice(0, 12)));
     };
-    img.src = thumbSrc;
+    img.src = src;
   } catch (e) { /* quota plein : pas grave */ }
 }
 
@@ -339,15 +457,15 @@ function renderHistory() {
   const list = readHistory();
   if (!list.length) return hide('histCard');
   $('hist').innerHTML = '';
-  list.forEach((it, i) => {
+  list.forEach((it) => {
     const im = new Image();
     im.src = it.thumb;
-    im.title = it.data.espece || '';
+    im.title = (it.data && it.data.espece) || '';
     im.onclick = () => {
-      currentImage = it.thumb;
-      $('preview').src = it.thumb;
-      hide('pickCard', 'errCard');
-      show('shotCard');
+      $('frozen').src = it.thumb;
+      show('frozen', 'againCard');
+      hide('video', 'controls', 'reticle', 'hint');
+      stopCamera();
       render(it.data);
     };
     $('hist').appendChild(im);
@@ -355,7 +473,19 @@ function renderHistory() {
   show('histCard');
 }
 
+/* ---------- démarrage ---------- */
+
 renderHistory();
+startCamera();
+
+// On coupe la caméra quand l'onglet passe en arrière-plan, on la relance au retour
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopCamera();
+  } else if (!busy && !$('video').classList.contains('hidden')) {
+    startCamera();
+  }
+});
 </script>
 </body>
 </html>
