@@ -1,6 +1,6 @@
 --!strict
--- Données du jeu : la liste des maisons, leurs raretés, leurs chances et leurs
--- revenus. Utilisé côté serveur (tirage + revenu) et côté client (affichage).
+-- Données du jeu : la liste des maisons (rareté, revenu, prix, matériaux).
+-- Utilisé côté serveur (marché, construction, revenu) et côté client (affichage).
 
 local Houses = {}
 
@@ -8,21 +8,67 @@ export type House = {
 	id: string,
 	name: string,
 	rarity: string,
-	weight: number, -- poids relatif : plus c'est petit, plus c'est rare
-	income: number, -- argent par seconde quand la maison est posée
+	weight: number, -- poids relatif d'apparition au marché : plus petit = plus rare
+	income: number, -- argent par seconde une fois posée
+	cost: number, -- prix d'achat au marché (avant remise)
 	color: Color3,
+	wallMaterial: Enum.Material,
+	roofMaterial: Enum.Material,
+	trimColor: Color3,
+	windowColor: Color3,
 }
 
--- Du plus commun au plus rare. L'ordre = le niveau (tier) de la maison,
--- qui sert aussi à la faire grandir visuellement (nombre d'étages).
+-- Du plus commun au plus rare. L'ordre = le niveau (tier) de la maison.
 Houses.List = {
-	{ id = "cabane", name = "Cabane", rarity = "Commun", weight = 1000, income = 1, color = Color3.fromRGB(150, 111, 80) },
-	{ id = "maison", name = "Maison", rarity = "Peu commun", weight = 400, income = 6, color = Color3.fromRGB(205, 205, 205) },
-	{ id = "villa", name = "Villa", rarity = "Rare", weight = 150, income = 30, color = Color3.fromRGB(90, 170, 255) },
-	{ id = "manoir", name = "Manoir", rarity = "Épique", weight = 40, income = 150, color = Color3.fromRGB(180, 110, 255) },
-	{ id = "chateau", name = "Château", rarity = "Légendaire", weight = 9, income = 800, color = Color3.fromRGB(255, 185, 55) },
-	{ id = "palais", name = "Palais", rarity = "Mythique", weight = 1.5, income = 4000, color = Color3.fromRGB(255, 80, 130) },
-	{ id = "palais_or", name = "Palais d'Or", rarity = "Secret", weight = 0.15, income = 25000, color = Color3.fromRGB(255, 235, 100) },
+	{
+		id = "cabane", name = "Cabane", rarity = "Commun",
+		weight = 1000, income = 1, cost = 50,
+		color = Color3.fromRGB(150, 111, 80),
+		wallMaterial = Enum.Material.WoodPlanks, roofMaterial = Enum.Material.Slate,
+		trimColor = Color3.fromRGB(74, 52, 38), windowColor = Color3.fromRGB(200, 225, 235),
+	},
+	{
+		id = "maison", name = "Maison", rarity = "Peu commun",
+		weight = 400, income = 6, cost = 400,
+		color = Color3.fromRGB(222, 222, 222),
+		wallMaterial = Enum.Material.Brick, roofMaterial = Enum.Material.Slate,
+		trimColor = Color3.fromRGB(70, 60, 55), windowColor = Color3.fromRGB(195, 222, 235),
+	},
+	{
+		id = "villa", name = "Villa", rarity = "Rare",
+		weight = 150, income = 30, cost = 2500,
+		color = Color3.fromRGB(235, 238, 242),
+		wallMaterial = Enum.Material.Concrete, roofMaterial = Enum.Material.Pebble,
+		trimColor = Color3.fromRGB(90, 170, 255), windowColor = Color3.fromRGB(150, 210, 255),
+	},
+	{
+		id = "manoir", name = "Manoir", rarity = "Épique",
+		weight = 40, income = 150, cost = 15000,
+		color = Color3.fromRGB(238, 232, 245),
+		wallMaterial = Enum.Material.Marble, roofMaterial = Enum.Material.Slate,
+		trimColor = Color3.fromRGB(180, 110, 255), windowColor = Color3.fromRGB(210, 180, 255),
+	},
+	{
+		id = "chateau", name = "Château", rarity = "Légendaire",
+		weight = 9, income = 800, cost = 90000,
+		color = Color3.fromRGB(240, 236, 220),
+		wallMaterial = Enum.Material.Marble, roofMaterial = Enum.Material.Metal,
+		trimColor = Color3.fromRGB(255, 185, 55), windowColor = Color3.fromRGB(255, 224, 160),
+	},
+	{
+		id = "palais", name = "Palais", rarity = "Mythique",
+		weight = 1.5, income = 4000, cost = 600000,
+		color = Color3.fromRGB(255, 235, 245),
+		wallMaterial = Enum.Material.Marble, roofMaterial = Enum.Material.Metal,
+		trimColor = Color3.fromRGB(255, 80, 130), windowColor = Color3.fromRGB(255, 180, 210),
+	},
+	{
+		id = "palais_or", name = "Palais d'Or", rarity = "Secret",
+		weight = 0.15, income = 25000, cost = 5000000,
+		color = Color3.fromRGB(255, 221, 120),
+		wallMaterial = Enum.Material.Metal, roofMaterial = Enum.Material.Metal,
+		trimColor = Color3.fromRGB(255, 240, 120), windowColor = Color3.fromRGB(255, 250, 200),
+	},
 }
 
 Houses.RarityColor = {
@@ -47,13 +93,13 @@ end
 
 local rng = Random.new()
 
--- Tire une maison au hasard. `luck` >= 1 booste les maisons rares.
+-- Tire une maison au hasard : utilisé pour choisir l'article affiché sur
+-- chaque présentoir du marché. `luck` >= 1 booste les maisons rares.
 function Houses.roll(luck: number): House
 	luck = math.max(1, luck)
 	local weights = table.create(#Houses.List)
 	local total = 0
 	for i, h in Houses.List do
-		-- seules les maisons déjà peu communes profitent de la chance
 		local w = if h.weight < 300 then h.weight * luck else h.weight
 		weights[i] = w
 		total += w
@@ -70,7 +116,7 @@ function Houses.roll(luck: number): House
 	return Houses.List[1]
 end
 
--- "1 sur X" (chances de base, sans la chance bonus) pour l'affichage.
+-- "1 sur X" (rareté de base) pour l'affichage, pure info/flavor.
 function Houses.oneIn(house: House): number
 	return math.max(1, math.floor(Houses.TotalWeight / house.weight))
 end

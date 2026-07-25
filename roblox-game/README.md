@@ -12,16 +12,27 @@ vers Roblox Studio : dès que le code change dans le repo, ton jeu se met à jou
 
 ## 🎮 Boucle de jeu
 
-- **ROLL** (bouton, touche R, ou AUTO) → la maison tirée va dans ton **inventaire**.
-- **Pose tes maisons** : sélectionne une maison dans l'inventaire (à droite) puis
-  clique une **case verte** de ta grille (4×4 = 16 cases) pour la construire.
-  Reclique une maison posée pour la **reprendre** dans l'inventaire.
+- **Le marché** : une plaza avec 8 présentoirs qui font tourner une maison
+  miniature chacun, changeant automatiquement toutes les 5-9 s. Approche-toi
+  et **maintiens E** pour l'acheter (prix affiché au-dessus) → elle rejoint
+  ton **inventaire**. Aucun bouton "roll" : tout se passe dans le monde.
+- **Pose tes maisons** : sélectionne une maison dans l'inventaire (à droite)
+  puis clique une **case verte** de ta grille (4×4 = 16 cases) sur ton
+  terrain pour la construire. Reclique une maison posée pour la **reprendre**.
 - **Chaque maison posée rapporte** de l'argent/seconde ; le total × ton
   multiplicateur de Renaissance donne ton revenu.
-- **🍀 Chance +** dépense ton argent pour augmenter tes chances de rare.
-- **🔄 Renaissance** : quand tu as assez d'argent, tu peux renaître → l'argent
-  repart à zéro mais tu gagnes **+50 % de revenu permanent** et **+1 chance** à
-  chaque fois. Le coût augmente à chaque Renaissance.
+- **🏷️ Remise +** dépense ton argent pour réduire le prix des maisons au
+  marché (jusqu'à -75 %).
+- **🔄 Renaissance** : quand tu as assez d'argent, renais → l'argent repart à
+  zéro mais tu gagnes **+50 % de revenu permanent**. Le coût augmente à
+  chaque Renaissance.
+- **Achat = petit spectacle** : rayon de lumière, particules, onde de choc et
+  tremblement de caméra sur ton perso, l'intensité montant avec la rareté
+  (voir `client/Reveal.luau`).
+- **Vrais matériaux** : chaque rareté a ses textures (bois/brique pour les
+  communes, marbre/verre pour les rares, or pour le Palais d'Or) via
+  `server/HouseBuilder.luau`, réutilisé pour les maisons posées ET les
+  miniatures du marché.
 
 ---
 

@@ -1,22 +1,23 @@
--- 🏠 House RNG Tycoon — HUD joueur (la révélation du tirage est en 3D, voir Reveal)
+-- 🏠 House RNG Tycoon — HUD joueur
+--
+-- Plus de bouton "roll" : les maisons s'achètent directement au marché
+-- (présentoirs qui tournent dans le monde, E pour acheter), puis se posent
+-- sur la grille perso. La révélation de l'achat se joue en 3D (voir Reveal).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
 
 local Houses = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Houses"))
 local Reveal = require(script.Reveal)
 
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
-local RollEvent = remotes:WaitForChild("Roll")
-local ResultEvent = remotes:WaitForChild("RollResult")
+local AcquiredEvent = remotes:WaitForChild("Acquired")
 local DataEvent = remotes:WaitForChild("UpdateData")
-local LuckEvent = remotes:WaitForChild("BuyLuck")
+local DiscountEvent = remotes:WaitForChild("BuyDiscount")
 local SelectEvent = remotes:WaitForChild("Select")
 local RebirthEvent = remotes:WaitForChild("Rebirth")
 
 local player = Players.LocalPlayer
-local ROLL_COOLDOWN = 0.3
 
 local PANEL_TOP = Color3.fromRGB(30, 36, 46)
 local PANEL_BOT = Color3.fromRGB(17, 20, 27)
@@ -108,7 +109,7 @@ local function statLine()
 	})
 end
 local incomeLine = statLine()
-local luckLine = statLine()
+local discountLine = statLine()
 local rebirthLine = statLine()
 
 local function bigButton(pos, c1, c2)
@@ -128,17 +129,17 @@ local function bigButton(pos, c1, c2)
 	new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), Parent = b })
 	return b
 end
-local luckBtn = bigButton(UDim2.fromScale(0.02, 0.35), Color3.fromRGB(72, 170, 92), Color3.fromRGB(44, 120, 66))
+local discountBtn = bigButton(UDim2.fromScale(0.02, 0.35), Color3.fromRGB(72, 170, 92), Color3.fromRGB(44, 120, 66))
 local rebirthBtn = bigButton(UDim2.fromScale(0.02, 0.44), Color3.fromRGB(150, 92, 210), Color3.fromRGB(96, 54, 150))
 
 -- Inventaire (droite)
 local invPanel = panel({
-	Size = UDim2.fromScale(0.23, 0.6),
+	Size = UDim2.fromScale(0.23, 0.62),
 	Position = UDim2.fromScale(0.75, 0.13),
 	Parent = gui,
 })
 new("TextLabel", {
-	Size = UDim2.fromScale(1, 0.08),
+	Size = UDim2.fromScale(1, 0.07),
 	BackgroundTransparency = 1,
 	Font = Enum.Font.FredokaOne,
 	TextScaled = true,
@@ -147,19 +148,19 @@ new("TextLabel", {
 	Parent = invPanel,
 })
 new("TextLabel", {
-	Size = UDim2.fromScale(0.9, 0.09),
-	Position = UDim2.fromScale(0.05, 0.08),
+	Size = UDim2.fromScale(0.9, 0.11),
+	Position = UDim2.fromScale(0.05, 0.07),
 	BackgroundTransparency = 1,
 	Font = Enum.Font.Gotham,
 	TextScaled = true,
 	TextWrapped = true,
 	TextColor3 = DIM,
-	Text = "Choisis une maison, puis clique une case pour la poser.",
+	Text = "Achète au marché (E), puis clique une case verte pour poser.",
 	Parent = invPanel,
 })
 local invScroll = new("ScrollingFrame", {
-	Size = UDim2.fromScale(0.92, 0.78),
-	Position = UDim2.fromScale(0.04, 0.2),
+	Size = UDim2.fromScale(0.92, 0.76),
+	Position = UDim2.fromScale(0.04, 0.21),
 	BackgroundTransparency = 1,
 	BorderSizePixel = 0,
 	ScrollBarThickness = 5,
@@ -170,36 +171,6 @@ local invScroll = new("ScrollingFrame", {
 })
 new("UIListLayout", { Padding = UDim.new(0, 6), Parent = invScroll })
 
--- ROLL + AUTO (bas)
-local rollBtn = new("TextButton", {
-	Size = UDim2.fromScale(0.42, 0.135),
-	Position = UDim2.fromScale(0.17, 0.83),
-	BackgroundColor3 = Color3.fromRGB(86, 214, 122),
-	Font = Enum.Font.FredokaOne,
-	TextScaled = true,
-	TextColor3 = Color3.fromRGB(9, 40, 20),
-	AutoButtonColor = false,
-	Text = "🎲 ROLL",
-	Parent = gui,
-})
-corner(rollBtn, 20)
-gradient(rollBtn, Color3.fromRGB(120, 240, 150), Color3.fromRGB(56, 180, 96), 90)
-stroke(rollBtn, Color3.fromRGB(255, 255, 255), 2.5, 0.25)
-new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), Parent = rollBtn })
-
-local autoBtn = new("TextButton", {
-	Size = UDim2.fromScale(0.13, 0.135),
-	Position = UDim2.fromScale(0.6, 0.83),
-	BackgroundColor3 = Color3.fromRGB(52, 60, 72),
-	Font = Enum.Font.GothamBold,
-	TextScaled = true,
-	TextColor3 = Color3.fromRGB(210, 216, 224),
-	Text = "AUTO\nOFF",
-	Parent = gui,
-})
-corner(autoBtn, 20)
-stroke(autoBtn, Color3.fromRGB(90, 100, 115), 1.5, 0.3)
-
 -- ─── Inventaire : cartes ───
 local function rebuildInventory(inventory, selected)
 	for _, c in invScroll:GetChildren() do
@@ -207,9 +178,11 @@ local function rebuildInventory(inventory, selected)
 			c:Destroy()
 		end
 	end
+	local any = false
 	for _, house in Houses.List do
 		local count = inventory[house.id]
 		if count and count > 0 then
+			any = true
 			local rc = Houses.RarityColor[house.rarity]
 			local item = new("Frame", {
 				Size = UDim2.new(1, 0, 0, 40),
@@ -262,10 +235,22 @@ local function rebuildInventory(inventory, selected)
 			end)
 		end
 	end
+	if not any then
+		new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 60),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Gotham,
+			TextScaled = true,
+			TextWrapped = true,
+			TextColor3 = DIM,
+			Text = "Vide. Va acheter une maison au marché !",
+			Parent = invScroll,
+		})
+	end
 end
 
--- ─── La révélation d'un tirage se joue dans le monde 3D ───
-ResultEvent.OnClientEvent:Connect(function(info)
+-- ─── La révélation d'un achat se joue dans le monde 3D ───
+AcquiredEvent.OnClientEvent:Connect(function(info)
 	Reveal.play(info)
 end)
 
@@ -273,9 +258,9 @@ end)
 local currentReq = math.huge
 DataEvent.OnClientEvent:Connect(function(d)
 	incomeLine.Text = string.format("📈 Revenu : +%s /s", Houses.format(d.income))
-	luckLine.Text = string.format("🍀 Chance : Niv.%d (x%.1f)", d.luckLevel, d.luck)
+	discountLine.Text = string.format("🏷️ Remise : Niv.%d (-%d%%)", d.luckLevel, math.min(75, d.luckLevel * 3))
 	rebirthLine.Text = string.format("🔄 Renaissance : %d (x%.1f)", d.rebirths, d.mult)
-	luckBtn.Text = "🍀 Chance +\n" .. Houses.format(d.luckCost)
+	discountBtn.Text = "🏷️ Remise +\n" .. Houses.format(d.luckCost)
 	rebirthBtn.Text = "🔄 Renaissance\n" .. Houses.format(d.rebirthReq)
 	currentReq = d.rebirthReq
 	rebuildInventory(d.inventory, d.selected)
@@ -291,49 +276,11 @@ argent.Changed:Connect(refreshCash)
 refreshCash()
 
 -- ─── Actions ───
-local lastRoll = 0
-local function doRoll()
-	local now = os.clock()
-	if now - lastRoll < ROLL_COOLDOWN then
-		return
-	end
-	lastRoll = now
-	RollEvent:FireServer()
-end
-
-rollBtn.MouseButton1Click:Connect(doRoll)
-rollBtn.MouseButton1Down:Connect(function()
-	rollBtn.Size = UDim2.fromScale(0.4, 0.125)
-end)
-rollBtn.MouseButton1Up:Connect(function()
-	rollBtn.Size = UDim2.fromScale(0.42, 0.135)
-end)
-luckBtn.MouseButton1Click:Connect(function()
-	LuckEvent:FireServer()
+discountBtn.MouseButton1Click:Connect(function()
+	DiscountEvent:FireServer()
 end)
 rebirthBtn.MouseButton1Click:Connect(function()
 	RebirthEvent:FireServer()
-end)
-
-UserInputService.InputBegan:Connect(function(input, processed)
-	if not processed and input.KeyCode == Enum.KeyCode.R then
-		doRoll()
-	end
-end)
-
-local auto = false
-autoBtn.MouseButton1Click:Connect(function()
-	auto = not auto
-	autoBtn.Text = auto and "AUTO\nON" or "AUTO\nOFF"
-	autoBtn.BackgroundColor3 = auto and Color3.fromRGB(72, 170, 92) or Color3.fromRGB(52, 60, 72)
-end)
-task.spawn(function()
-	while true do
-		if auto then
-			doRoll()
-		end
-		task.wait(ROLL_COOLDOWN)
-	end
 end)
 
 print("🏠 House RNG Tycoon — HUD prêt")
