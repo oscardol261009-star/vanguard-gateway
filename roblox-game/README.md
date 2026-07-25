@@ -1,8 +1,22 @@
-# 🎮 Mon Jeu Roblox (via Rojo)
+# 🏠 House RNG Simulator (Roblox, via Rojo)
 
-Le code du jeu vit ici, dans des fichiers `.luau`. **Rojo** les synchronise
-automatiquement vers Roblox Studio : dès que le code change dans le repo, ton
-jeu se met à jour dans Studio.
+Un simulateur où tu **roll** pour tirer des maisons de rareté aléatoire. Ta
+meilleure maison se construit sur ton terrain et te génère de l'argent chaque
+seconde ; tu dépenses cet argent en **Chance** pour tirer des maisons plus rares.
+
+Raretés : Cabane → Maison → Villa → Manoir → Château → Palais → **Palais d'Or**
+(1 sur ~11 000).
+
+Le code vit ici dans des fichiers `.luau`. **Rojo** les synchronise automatiquement
+vers Roblox Studio : dès que le code change dans le repo, ton jeu se met à jour.
+
+## 🎮 Boucle de jeu
+
+- **ROLL** (bouton, touche R, ou AUTO) → tire une maison au hasard.
+- Une maison plus rare que ta meilleure ? Elle se **construit sur ton terrain**
+  (plus elle est rare, plus elle est grande + flèche/orbe lumineux).
+- Ta meilleure maison génère de l'**argent/seconde** (visible dans le leaderboard).
+- **🍀 Chance +** dépense ton argent pour augmenter tes chances de rare.
 
 ---
 
