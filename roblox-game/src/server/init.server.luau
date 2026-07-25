@@ -1,7 +1,8 @@
--- 🏠 House RNG Simulator — logique serveur (autorité)
+-- 🏠 House RNG Tycoon — logique serveur (autorité)
 --
--- Gère : les terrains des joueurs, le tirage des maisons, la construction de la
--- meilleure maison sur le terrain, le revenu par seconde et l'amélioration Chance.
+-- Boucle : ROLL -> maisons dans l'inventaire -> on les POSE sur une grille de
+-- cases -> chaque maison posée rapporte de l'argent -> RENAISSANCE pour un
+-- multiplicateur permanent. Améliorations : Chance (meilleurs tirages).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -9,7 +10,7 @@ local RunService = game:GetService("RunService")
 
 local Houses = require(ReplicatedStorage.Shared.Houses)
 
--- ─── Remotes (créés par code, le client les attend avec WaitForChild) ───
+-- ─── Remotes ───
 local remotes = Instance.new("Folder")
 remotes.Name = "Remotes"
 remotes.Parent = ReplicatedStorage
@@ -21,34 +22,44 @@ local function makeEvent(name: string): RemoteEvent
 	return e
 end
 
-local RollEvent = makeEvent("Roll") -- client -> serveur : demande un tirage
-local ResultEvent = makeEvent("RollResult") -- serveur -> client : maison tirée
-local DataEvent = makeEvent("UpdateData") -- serveur -> client : état du joueur
-local LuckEvent = makeEvent("BuyLuck") -- client -> serveur : acheter de la chance
+local RollEvent = makeEvent("Roll")
+local ResultEvent = makeEvent("RollResult")
+local DataEvent = makeEvent("UpdateData")
+local LuckEvent = makeEvent("BuyLuck")
+local SelectEvent = makeEvent("Select") -- client choisit une maison de l'inventaire
+local RebirthEvent = makeEvent("Rebirth")
 
 -- ─── Réglages ───
-local ROLL_COOLDOWN = 0.35 -- secondes entre deux tirages
-local PLOT_SIZE = 46
-local PLOT_GAP = 14
+local ROLL_COOLDOWN = 0.3
+local PLOT_SIZE = 58
+local PLOT_GAP = 16
 local PLOTS_PER_ROW = 5
+local GRID = 4 -- grille 4x4 = 16 cases
+local SLOTS = GRID * GRID
+local SPACING = 12
 local LUCK_BASE_COST = 150
-local LUCK_STEP = 0.6 -- +0.6 de chance par niveau
+local LUCK_STEP = 0.6
+local REBIRTH_BASE = 10000
+local REBIRTH_MULT_STEP = 0.5 -- +50% de revenu par renaissance
+local REBIRTH_LUCK_STEP = 1 -- +1 de chance par renaissance
 
--- ─── État par joueur ───
-local data = {} -- [player] = { cashFloat, cash, luckLevel, luck, bestTier, bestId, plot, lastRoll }
+local data = {}
 
 local function luckCost(level: number): number
 	return math.floor(LUCK_BASE_COST * (1.7 ^ level))
 end
+local function rebirthReq(n: number): number
+	return math.floor(REBIRTH_BASE * (6 ^ n))
+end
 
--- ─── Terrains ───
+-- ─── Construction d'un terrain + sa grille de cases cliquables ───
 local freePlots = {}
 local nextPlotIndex = 0
 
 local function buildPlot(index: number)
 	local col = index % PLOTS_PER_ROW
 	local row = math.floor(index / PLOTS_PER_ROW)
-	local origin = Vector3.new(col * (PLOT_SIZE + PLOT_GAP), 0.5, row * (PLOT_SIZE + PLOT_GAP) - 120)
+	local origin = Vector3.new(col * (PLOT_SIZE + PLOT_GAP), 0.5, row * (PLOT_SIZE + PLOT_GAP) - 140)
 
 	local model = Instance.new("Model")
 	model.Name = "Plot_" .. index
@@ -63,7 +74,32 @@ local function buildPlot(index: number)
 	base.Parent = model
 
 	model.Parent = workspace
-	return { model = model, origin = origin + Vector3.new(0, 1, 0), houseModel = nil }
+
+	local top = origin + Vector3.new(0, 1, 0)
+	local pads = {}
+	for slot = 0, SLOTS - 1 do
+		local c = slot % GRID
+		local r = math.floor(slot / GRID)
+		local pos = top + Vector3.new((c - (GRID - 1) / 2) * SPACING, 0.1, (r - (GRID - 1) / 2) * SPACING)
+
+		local pad = Instance.new("Part")
+		pad.Name = "Pad_" .. slot
+		pad.Anchored = true
+		pad.Size = Vector3.new(SPACING - 1.5, 0.4, SPACING - 1.5)
+		pad.Position = pos
+		pad.Color = Color3.fromRGB(120, 200, 140)
+		pad.Material = Enum.Material.SmoothPlastic
+		pad.Transparency = 0.5
+		pad.Parent = model
+
+		local cd = Instance.new("ClickDetector")
+		cd.MaxActivationDistance = 80
+		cd.Parent = pad
+
+		pads[slot] = pad
+	end
+
+	return { model = model, origin = top, pads = pads }
 end
 
 local function getPlot()
@@ -75,23 +111,26 @@ local function getPlot()
 	return p
 end
 
--- ─── Construction d'une maison sur un terrain (tout est généré par code) ───
-local function buildHouse(plot, house, tier: number)
-	if plot.houseModel then
-		plot.houseModel:Destroy()
+-- ─── Construction visuelle d'une maison sur une case ───
+local function buildHouseOnPad(d, slot: number, house, tier: number)
+	if d.placedModels[slot] then
+		d.placedModels[slot]:Destroy()
+		d.placedModels[slot] = nil
 	end
 
-	local model = Instance.new("Model")
-	model.Name = "House"
+	local pad = d.plot.pads[slot]
+	local cx, cz = pad.Position.X, pad.Position.Z
+	local y = pad.Position.Y
 
-	local cx, cz = plot.origin.X, plot.origin.Z
-	local y = plot.origin.Y
-	local floorH = 5
-	local floors = tier -- 1 étage pour Cabane ... 7 pour Palais d'Or
-	local baseW = 12
+	local model = Instance.new("Model")
+	model.Name = "House_" .. slot
+
+	local floors = math.min(tier, 6)
+	local floorH = 3
+	local baseW = 7
 
 	for f = 1, floors do
-		local shrink = (f - 1) * 0.9
+		local shrink = (f - 1) * 0.7
 		local part = Instance.new("Part")
 		part.Anchored = true
 		part.Size = Vector3.new(baseW - shrink, floorH, baseW - shrink)
@@ -105,102 +144,132 @@ local function buildHouse(plot, house, tier: number)
 
 	local roof = Instance.new("Part")
 	roof.Anchored = true
-	roof.Size = Vector3.new(baseW - (floors - 1) * 0.9 + 2, 1.4, baseW - (floors - 1) * 0.9 + 2)
-	roof.Position = Vector3.new(cx, topY + 0.7, cz)
+	roof.Size = Vector3.new(baseW - (floors - 1) * 0.7 + 1.5, 1, baseW - (floors - 1) * 0.7 + 1.5)
+	roof.Position = Vector3.new(cx, topY + 0.5, cz)
 	roof.Color = Color3.fromRGB(60, 48, 42)
 	roof.Material = Enum.Material.Slate
 	roof.Parent = model
 
 	local door = Instance.new("Part")
 	door.Anchored = true
-	door.Size = Vector3.new(3, 5, 0.5)
-	door.Position = Vector3.new(cx, y + 2.5, cz - baseW / 2)
+	door.Size = Vector3.new(2, 3, 0.4)
+	door.Position = Vector3.new(cx, y + 1.5, cz - baseW / 2)
 	door.Color = Color3.fromRGB(48, 30, 20)
-	door.Material = Enum.Material.Wood
 	door.Parent = model
 
-	-- flèche dorée pour Légendaire+
 	if tier >= 5 then
 		local spire = Instance.new("Part")
 		spire.Anchored = true
-		spire.Size = Vector3.new(1.4, 9, 1.4)
-		spire.Position = Vector3.new(cx, topY + 5, cz)
+		spire.Size = Vector3.new(1, 6, 1)
+		spire.Position = Vector3.new(cx, topY + 3.5, cz)
 		spire.Color = Color3.fromRGB(235, 205, 120)
 		spire.Material = Enum.Material.Metal
 		spire.Parent = model
 	end
-
-	-- orbe lumineux pour Mythique+
 	if tier >= 6 then
 		local orb = Instance.new("Part")
 		orb.Anchored = true
 		orb.Shape = Enum.PartType.Ball
-		orb.Size = Vector3.new(4, 4, 4)
-		orb.Position = Vector3.new(cx, topY + 11, cz)
+		orb.Size = Vector3.new(3, 3, 3)
+		orb.Position = Vector3.new(cx, topY + 8, cz)
 		orb.Color = house.color
 		orb.Material = Enum.Material.Neon
 		orb.Parent = model
-
 		local light = Instance.new("PointLight")
 		light.Color = house.color
-		light.Range = 26
+		light.Range = 22
 		light.Brightness = 3
 		light.Parent = orb
 	end
 
-	-- étiquette flottante au-dessus
 	local bb = Instance.new("BillboardGui")
 	bb.Adornee = roof
-	bb.Size = UDim2.fromOffset(230, 54)
-	bb.StudsOffset = Vector3.new(0, 4, 0)
+	bb.Size = UDim2.fromOffset(150, 30)
+	bb.StudsOffset = Vector3.new(0, 2.5, 0)
 	bb.AlwaysOnTop = true
-
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.fromScale(1, 0.6)
-	title.BackgroundTransparency = 1
-	title.Font = Enum.Font.GothamBold
-	title.TextScaled = true
-	title.TextColor3 = Houses.RarityColor[house.rarity]
-	title.TextStrokeTransparency = 0.4
-	title.Text = house.name
-	title.Parent = bb
-
-	local sub = Instance.new("TextLabel")
-	sub.Size = UDim2.fromScale(1, 0.4)
-	sub.Position = UDim2.fromScale(0, 0.6)
-	sub.BackgroundTransparency = 1
-	sub.Font = Enum.Font.GothamMedium
-	sub.TextScaled = true
-	sub.TextColor3 = Color3.fromRGB(230, 230, 230)
-	sub.TextStrokeTransparency = 0.5
-	sub.Text = "+" .. Houses.format(house.income) .. " /s"
-	sub.Parent = bb
-
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextScaled = true
+	lbl.TextColor3 = Houses.RarityColor[house.rarity]
+	lbl.TextStrokeTransparency = 0.4
+	lbl.Text = house.name
+	lbl.Parent = bb
 	bb.Parent = roof
 
-	model.Parent = plot.model
-	plot.houseModel = model
+	model.Parent = d.plot.model
+	d.placedModels[slot] = model
 end
 
--- ─── Envoi de l'état au client ───
+-- ─── Revenu total = somme des maisons posées × multiplicateur ───
+local function recomputeIncome(d)
+	local total = 0
+	for _, id in d.grid do
+		total += Houses.ById[id].income
+	end
+	d.income = total * d.mult
+end
+
 local function pushData(player)
 	local d = data[player]
 	if not d then
 		return
 	end
-	local best = Houses.List[d.bestTier]
 	DataEvent:FireClient(player, {
 		cash = d.cash,
 		luckLevel = d.luckLevel,
 		luck = d.luck,
 		luckCost = luckCost(d.luckLevel),
-		bestName = best.name,
-		bestRarity = best.rarity,
-		income = best.income,
+		rebirths = d.rebirths,
+		mult = d.mult,
+		rebirthReq = rebirthReq(d.rebirths),
+		income = d.income,
+		inventory = d.inventory,
+		selected = d.selected,
 	})
 end
 
--- ─── Connexion / déconnexion ───
+-- ─── Poser / reprendre une maison quand on clique une case ───
+local function onPadClicked(player, slot: number)
+	local d = data[player]
+	if not d then
+		return
+	end
+
+	local placed = d.grid[slot]
+	if placed then
+		-- reprendre : la maison retourne dans l'inventaire
+		d.inventory[placed] = (d.inventory[placed] or 0) + 1
+		d.grid[slot] = nil
+		if d.placedModels[slot] then
+			d.placedModels[slot]:Destroy()
+			d.placedModels[slot] = nil
+		end
+		d.plot.pads[slot].Transparency = 0.5
+		recomputeIncome(d)
+		pushData(player)
+		return
+	end
+
+	-- poser la maison sélectionnée
+	local id = d.selected
+	if not id or (d.inventory[id] or 0) <= 0 then
+		return
+	end
+	d.inventory[id] -= 1
+	if d.inventory[id] <= 0 then
+		d.inventory[id] = nil
+		d.selected = nil
+	end
+	d.grid[slot] = id
+	d.plot.pads[slot].Transparency = 0.9
+	buildHouseOnPad(d, slot, Houses.ById[id], Houses.TierById[id])
+	recomputeIncome(d)
+	pushData(player)
+end
+
+-- ─── Connexion ───
 Players.PlayerAdded:Connect(function(player)
 	local stats = Instance.new("Folder")
 	stats.Name = "leaderstats"
@@ -210,29 +279,52 @@ Players.PlayerAdded:Connect(function(player)
 	cash.Name = "Argent"
 	cash.Parent = stats
 
-	local maison = Instance.new("StringValue")
-	maison.Name = "Maison"
-	maison.Value = "Cabane"
-	maison.Parent = stats
+	local reb = Instance.new("IntValue")
+	reb.Name = "Renaissance"
+	reb.Parent = stats
 
 	local plot = getPlot()
 
-	data[player] = {
+	local d = {
 		cashFloat = 0,
 		cash = 0,
 		luckLevel = 0,
 		luck = 1,
-		bestTier = 1,
+		rebirths = 0,
+		mult = 1,
+		income = 0,
+		inventory = { cabane = 3 }, -- 3 cabanes pour démarrer
+		grid = {},
+		placedModels = {},
 		plot = plot,
+		selected = "cabane",
 		lastRoll = 0,
 	}
+	data[player] = d
 
-	buildHouse(plot, Houses.List[1], 1) -- on démarre avec une Cabane
+	-- brancher le clic de chaque case
+	for slot = 0, SLOTS - 1 do
+		local cd = plot.pads[slot]:FindFirstChildOfClass("ClickDetector")
+		if cd then
+			cd.MouseClick:Connect(function(clicker)
+				if clicker == player then
+					onPadClicked(player, slot)
+				end
+			end)
+		end
+	end
+
+	-- poser une cabane de départ pour amorcer le revenu
+	d.inventory.cabane = 2
+	d.grid[0] = "cabane"
+	plot.pads[0].Transparency = 0.9
+	buildHouseOnPad(d, 0, Houses.ById.cabane, 1)
+	recomputeIncome(d)
 
 	player.CharacterAdded:Connect(function(char)
 		local hrp = char:WaitForChild("HumanoidRootPart")
 		task.wait(0.15)
-		hrp.CFrame = CFrame.new(plot.origin + Vector3.new(0, 6, PLOT_SIZE / 2 - 6))
+		hrp.CFrame = CFrame.new(plot.origin + Vector3.new(0, 6, PLOT_SIZE / 2 - 5))
 	end)
 
 	pushData(player)
@@ -241,16 +333,13 @@ end)
 Players.PlayerRemoving:Connect(function(player)
 	local d = data[player]
 	if d then
-		if d.plot.houseModel then
-			d.plot.houseModel:Destroy()
-			d.plot.houseModel = nil
-		end
-		table.insert(freePlots, d.plot)
+		d.plot.model:Destroy()
+		-- terrain recréé à la volée pour le prochain (évite les modèles orphelins)
 	end
 	data[player] = nil
 end)
 
--- ─── Tirage ───
+-- ─── Tirage : va dans l'inventaire ───
 RollEvent.OnServerEvent:Connect(function(player)
 	local d = data[player]
 	if not d then
@@ -258,19 +347,14 @@ RollEvent.OnServerEvent:Connect(function(player)
 	end
 	local now = os.clock()
 	if now - d.lastRoll < ROLL_COOLDOWN then
-		return -- anti-spam : le serveur décide
+		return
 	end
 	d.lastRoll = now
 
 	local house = Houses.roll(d.luck)
-	local tier = Houses.TierById[house.id]
-	local isNewBest = tier > d.bestTier
-
-	if isNewBest then
-		d.bestTier = tier
-		buildHouse(d.plot, house, tier)
-		player.leaderstats.Maison.Value = house.name
-		pushData(player)
+	d.inventory[house.id] = (d.inventory[house.id] or 0) + 1
+	if not d.selected then
+		d.selected = house.id
 	end
 
 	ResultEvent:FireClient(player, {
@@ -278,8 +362,21 @@ RollEvent.OnServerEvent:Connect(function(player)
 		rarity = house.rarity,
 		income = house.income,
 		oneIn = Houses.oneIn(house),
-		isNewBest = isNewBest,
+		tier = Houses.TierById[house.id],
 	})
+	pushData(player)
+end)
+
+-- ─── Sélection d'une maison de l'inventaire ───
+SelectEvent.OnServerEvent:Connect(function(player, houseId)
+	local d = data[player]
+	if not d or typeof(houseId) ~= "string" then
+		return
+	end
+	if (d.inventory[houseId] or 0) > 0 then
+		d.selected = houseId
+		pushData(player)
+	end
 end)
 
 -- ─── Achat de Chance ───
@@ -300,20 +397,41 @@ LuckEvent.OnServerEvent:Connect(function(player)
 	pushData(player)
 end)
 
+-- ─── Renaissance ───
+RebirthEvent.OnServerEvent:Connect(function(player)
+	local d = data[player]
+	if not d then
+		return
+	end
+	if d.cashFloat < rebirthReq(d.rebirths) then
+		return
+	end
+	d.rebirths += 1
+	d.mult = 1 + d.rebirths * REBIRTH_MULT_STEP
+	d.luck += REBIRTH_LUCK_STEP
+	d.cashFloat = 0
+	d.cash = 0
+	player.leaderstats.Argent.Value = 0
+	player.leaderstats.Renaissance.Value = d.rebirths
+	recomputeIncome(d)
+	pushData(player)
+end)
+
 -- ─── Boucle de revenu ───
 RunService.Heartbeat:Connect(function(dt)
 	for player, d in data do
-		local income = Houses.List[d.bestTier].income
-		d.cashFloat += income * dt
-		local rounded = math.floor(d.cashFloat)
-		if rounded ~= d.cash then
-			d.cash = rounded
-			local stats = player:FindFirstChild("leaderstats")
-			if stats then
-				stats.Argent.Value = rounded
+		if d.income > 0 then
+			d.cashFloat += d.income * dt
+			local rounded = math.floor(d.cashFloat)
+			if rounded ~= d.cash then
+				d.cash = rounded
+				local stats = player:FindFirstChild("leaderstats")
+				if stats then
+					stats.Argent.Value = rounded
+				end
 			end
 		end
 	end
 end)
 
-print("🏠 House RNG Simulator — serveur démarré")
+print("🏠 House RNG Tycoon — serveur démarré")

@@ -12,11 +12,16 @@ vers Roblox Studio : dès que le code change dans le repo, ton jeu se met à jou
 
 ## 🎮 Boucle de jeu
 
-- **ROLL** (bouton, touche R, ou AUTO) → tire une maison au hasard.
-- Une maison plus rare que ta meilleure ? Elle se **construit sur ton terrain**
-  (plus elle est rare, plus elle est grande + flèche/orbe lumineux).
-- Ta meilleure maison génère de l'**argent/seconde** (visible dans le leaderboard).
+- **ROLL** (bouton, touche R, ou AUTO) → la maison tirée va dans ton **inventaire**.
+- **Pose tes maisons** : sélectionne une maison dans l'inventaire (à droite) puis
+  clique une **case verte** de ta grille (4×4 = 16 cases) pour la construire.
+  Reclique une maison posée pour la **reprendre** dans l'inventaire.
+- **Chaque maison posée rapporte** de l'argent/seconde ; le total × ton
+  multiplicateur de Renaissance donne ton revenu.
 - **🍀 Chance +** dépense ton argent pour augmenter tes chances de rare.
+- **🔄 Renaissance** : quand tu as assez d'argent, tu peux renaître → l'argent
+  repart à zéro mais tu gagnes **+50 % de revenu permanent** et **+1 chance** à
+  chaque fois. Le coût augmente à chaque Renaissance.
 
 ---
 

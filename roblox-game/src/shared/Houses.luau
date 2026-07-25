@@ -35,11 +35,13 @@ Houses.RarityColor = {
 	["Secret"] = Color3.fromRGB(255, 240, 120),
 }
 
--- Table id -> index (le tier, de 1 à 7)
-Houses.TierById = {}
+-- Tables d'accès rapide
+Houses.TierById = {} -- id -> index (le tier, de 1 à 7)
+Houses.ById = {} -- id -> House
 Houses.TotalWeight = 0
 for i, h in Houses.List do
 	Houses.TierById[h.id] = i
+	Houses.ById[h.id] = h
 	Houses.TotalWeight += h.weight
 end
 
