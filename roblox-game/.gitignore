@@ -1,0 +1,10 @@
+# Fichiers Roblox binaires (on garde le code source, pas les .rbxl)
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+
+# Dépendances Rojo/Wally
+/Packages
+/ServerPackages
+/DevPackages
