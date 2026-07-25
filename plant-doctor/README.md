@@ -181,9 +181,32 @@ masquée, le reste marche.
 
 ---
 
+## 🔌 Garder le serveur éveillé (anti-veille)
+
+Sur le palier gratuit, Render endort le service après ~15 min sans visite, d'où un
+premier appel lent (~30 s) — voire un « Load failed » si le téléphone abandonne.
+Deux protections sont en place :
+
+1. **Auto-ping intégré** — le serveur se ping lui-même toutes les 10 min via
+   `RENDER_EXTERNAL_URL` (fournie automatiquement par Render). Tant qu'il tourne,
+   il ne s'endort pas. Rien à configurer.
+2. **Réessai automatique côté app** — si le serveur dort quand même, l'app affiche
+   « Réveil du serveur… » et retente toute seule (jusqu'à 3 fois) au lieu d'échouer.
+
+### Fiabilité totale (recommandé)
+
+L'auto-ping ne peut pas réveiller un service **déjà** endormi (son propre timer est
+gelé). Pour une dispo 24/7, ajoute un pinger **externe** gratuit :
+
+- Va sur **<https://uptimerobot.com>** (gratuit) ou **<https://cron-job.org>**
+- Crée un monitor de type **HTTP(s)** sur `https://TON-URL.onrender.com/health`
+- Intervalle : **5 minutes**
+
+> Un service maintenu éveillé 24/7 consomme ~720 h/mois, ce qui rentre tout juste
+> dans les 750 h gratuites de Render — à condition de n'avoir qu'un seul service actif.
+
 ## ⚠️ Bon à savoir
 
-- Free tier Render : le service s'endort après 15 min → premier appel ~30 s.
 - Free tier Gemini : limité en requêtes par minute et par jour. Si tu prends un
   `429`, attends une minute.
 - L'IA se trompe : ne consomme jamais une plante sur la seule base de ce diagnostic.

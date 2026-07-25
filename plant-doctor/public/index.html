@@ -357,27 +357,56 @@ async function analyze(dataUrl) {
 
   const msgs = ['Analyse en cours…', "Identification de l'espèce…", 'Recherche de symptômes…', 'Rédaction des conseils…'];
   let i = 0;
-  const tick = setInterval(() => { $('veilTxt').textContent = msgs[++i % msgs.length]; }, 3500);
+  const tick = setInterval(() => {
+    // on ne recouvre pas le message de reveil pendant un reessai
+    if (!$('veilTxt').dataset.locked) $('veilTxt').textContent = msgs[++i % msgs.length];
+  }, 3500);
+
+  const MAX_TRIES = 4;
 
   try {
-    const r = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: dataUrl, note: $('note').value }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'Erreur inconnue.');
+    let data = null;
+    for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+      try {
+        const r = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: dataUrl, note: $('note').value }),
+        });
+        data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Erreur inconnue.');
+        break; // succès
+      } catch (e) {
+        // un échec RÉSEAU (serveur endormi, coupure) = TypeError :
+        // "Failed to fetch" (Chrome) ou "Load failed" (Safari iOS). On retente.
+        const reseau = e instanceof TypeError;
+        if (reseau && attempt < MAX_TRIES) {
+          $('veilTxt').dataset.locked = '1';
+          $('veilTxt').textContent = 'Réveil du serveur… (essai ' + attempt + '/' + (MAX_TRIES - 1) + ')';
+          await sleep(4000 + attempt * 2000);
+          delete $('veilTxt').dataset.locked;
+          continue;
+        }
+        throw e;
+      }
+    }
     render(data);
     saveHistory(dataUrl, data);
   } catch (e) {
-    showError(e.message === 'Failed to fetch' ? 'Serveur injoignable. Vérifie ta connexion.' : e.message);
+    const reseau = e instanceof TypeError;
+    showError(reseau
+      ? 'Serveur toujours injoignable après plusieurs essais. Attends 30 s et réessaie.'
+      : e.message);
   } finally {
     clearInterval(tick);
+    delete $('veilTxt').dataset.locked;
     hide('scanline', 'veil');
     show('againCard');
     busy = false;
   }
 }
+
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 $('again').onclick = () => {
   destroyCard3d();

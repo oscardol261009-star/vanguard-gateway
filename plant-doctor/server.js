@@ -338,3 +338,26 @@ app.listen(PORT, () => {
   console.log(`   modele : ${MODEL} (Google Gemini)`);
   console.log(`   cle API : ${API_KEY ? 'OK' : 'MANQUANTE (export GEMINI_API_KEY=...)'}`);
 });
+
+/**
+ * Anti-veille (Render free tier).
+ *
+ * Sur le palier gratuit, Render endort le service apres ~15 min sans trafic
+ * entrant. On se ping soi-meme toutes les 10 min pour generer du trafic et
+ * rester eveille. Render fournit automatiquement RENDER_EXTERNAL_URL.
+ *
+ * Limite honnete : ca ne peut pas RE-reveiller un service deja endormi (le
+ * process est gele), mais tant qu'il tourne, le timer l'empeche de s'endormir.
+ * Pour une fiabilite totale, doubler avec un pinger externe (voir README).
+ */
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL;
+if (SELF_URL) {
+  const PING_MS = 10 * 60 * 1000;
+  const url = SELF_URL.replace(/\/+$/, '') + '/health';
+  setInterval(() => {
+    fetch(url)
+      .then((r) => console.log(`[KEEPALIVE] ${r.status}`))
+      .catch((e) => console.log('[KEEPALIVE] echec:', e.message));
+  }, PING_MS).unref();
+  console.log(`   anti-veille : ping ${url} toutes les 10 min`);
+}
