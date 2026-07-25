@@ -1,0 +1,1577 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>City Walk — ta ville en 3D</title>
+<style>
+  :root {
+    --bg: #0b1016;
+    --panel: rgba(12, 18, 26, 0.92);
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #e8eef5;
+    --dim: #8fa3b8;
+    --accent: #56b6ff;
+    --accent2: #ffcf6b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  canvas { display: block; }
+  #app { position: fixed; inset: 0; }
+
+  /* ---------- overlays ---------- */
+  .overlay {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: radial-gradient(1200px 700px at 50% 20%, #16283b 0%, #0a0f15 70%);
+    z-index: 40;
+  }
+  .card {
+    width: min(560px, calc(100vw - 32px));
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 26px 26px 22px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.55);
+  }
+  .card h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.02em; }
+  .card h1 span { color: var(--accent); }
+  .card p.sub { margin: 0 0 20px; color: var(--dim); }
+  label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin-bottom: 6px; }
+  .row { display: flex; gap: 10px; margin-bottom: 14px; }
+  .row > * { min-width: 0; }
+  input[type="text"], select {
+    width: 100%; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: #0e1620; color: var(--text);
+    font-size: 15px; outline: none;
+  }
+  input[type="text"]:focus, select:focus { border-color: var(--accent); }
+  button {
+    padding: 11px 16px; border-radius: 10px; border: 1px solid var(--line);
+    background: #16212e; color: var(--text); font-size: 14px; font-weight: 600;
+    cursor: pointer; white-space: nowrap;
+  }
+  button:hover { background: #1d2b3b; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #04121f; }
+  button.primary:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .results { margin: -6px 0 14px; max-height: 190px; overflow: auto; }
+  .results div {
+    padding: 9px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid transparent; font-size: 13px;
+  }
+  .results div:hover { background: #16212e; border-color: var(--line); }
+  .results div b { color: var(--text); }
+  .results div small { color: var(--dim); display: block; }
+  .keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px 14px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--dim); }
+  .keys b { color: var(--text); font-weight: 600; }
+  .err { color: #ff8f8f; font-size: 13px; margin-bottom: 10px; min-height: 0; }
+
+  /* ---------- loading ---------- */
+  #loading { z-index: 45; }
+  #loading .card { text-align: center; }
+  .bar { height: 6px; border-radius: 99px; background: #16212e; overflow: hidden; margin-top: 18px; }
+  .bar i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .35s ease; }
+  #loadMsg { color: var(--dim); margin-top: 12px; font-size: 13px; }
+
+  /* ---------- hud ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 20; opacity: 0; transition: opacity .3s; }
+  #hud.on { opacity: 1; }
+  #crosshair {
+    position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
+    border-radius: 50%; background: rgba(255,255,255,.75); box-shadow: 0 0 0 1.5px rgba(0,0,0,.35);
+  }
+  #place {
+    position: absolute; left: 50%; top: calc(50% + 26px); transform: translateX(-50%);
+    font-size: 13px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    background: rgba(0,0,0,.28); padding: 4px 10px; border-radius: 99px; backdrop-filter: blur(4px);
+    opacity: 0; transition: opacity .2s; max-width: 60vw; text-align: center;
+  }
+  #stats {
+    position: absolute; left: 14px; top: 14px; font-size: 12px; color: rgba(255,255,255,.8);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8); line-height: 1.7;
+  }
+  #stats b { color: #fff; }
+  #mapWrap {
+    position: absolute; right: 14px; top: 14px; width: 190px; height: 190px;
+    border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.18);
+    box-shadow: 0 10px 30px rgba(0,0,0,.45); background: #0d141c;
+  }
+  #minimap { width: 100%; height: 100%; }
+  #clock {
+    position: absolute; right: 14px; top: 214px; width: 190px; text-align: center;
+    font-size: 12px; color: rgba(255,255,255,.85); text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+  #tips {
+    position: absolute; left: 14px; bottom: 12px; font-size: 12px; color: rgba(255,255,255,.6);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+  #toast {
+    position: absolute; left: 50%; bottom: 60px; transform: translateX(-50%);
+    background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 99px; font-size: 13px;
+    opacity: 0; transition: opacity .25s; backdrop-filter: blur(6px);
+  }
+  #pauseHint {
+    position: fixed; inset: 0; display: none; place-items: center; z-index: 30;
+    background: rgba(6, 10, 15, .55); backdrop-filter: blur(3px); cursor: pointer;
+  }
+  #pauseHint.on { display: grid; }
+  #pauseHint div { text-align: center; }
+  #pauseHint h2 { margin: 0 0 6px; font-size: 22px; }
+  #pauseHint p { margin: 0; color: var(--dim); }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- ====== HUD ====== -->
+<div id="hud">
+  <div id="crosshair"></div>
+  <div id="place"></div>
+  <div id="stats"></div>
+  <div id="mapWrap"><canvas id="minimap"></canvas></div>
+  <div id="clock"></div>
+  <div id="tips">ZQSD/WASD marcher &nbsp;·&nbsp; Maj courir &nbsp;·&nbsp; Espace saut &nbsp;·&nbsp; F voler &nbsp;·&nbsp; [ ] heure &nbsp;·&nbsp; T défilement du temps &nbsp;·&nbsp; P photo &nbsp;·&nbsp; Échap pause</div>
+  <div id="toast"></div>
+</div>
+
+<div id="pauseHint"><div>
+  <h2>Pause</h2>
+  <p>Clique pour reprendre la balade</p>
+</div></div>
+
+<!-- ====== MENU ====== -->
+<div class="overlay" id="menu">
+  <div class="card">
+    <h1>City <span>Walk</span></h1>
+    <p class="sub">Ta ville, en 3D, à pied. Les bâtiments, rues, parcs et rivières sont construits en direct depuis OpenStreetMap.</p>
+
+    <div class="err" id="menuErr"></div>
+
+    <label for="q">Ville, quartier ou adresse</label>
+    <div class="row">
+      <input type="text" id="q" placeholder="ex. Lyon, Place Bellecour" autocomplete="off">
+      <button id="searchBtn">Chercher</button>
+    </div>
+    <div class="results" id="results"></div>
+
+    <div class="row">
+      <div style="flex:1">
+        <label for="radius">Taille de la zone</label>
+        <select id="radius">
+          <option value="500">Quartier — 500 m (rapide)</option>
+          <option value="900" selected>Grand quartier — 900 m</option>
+          <option value="1400">Ville — 1,4 km (lourd)</option>
+          <option value="2000">Énorme — 2 km (très lourd)</option>
+        </select>
+      </div>
+      <div style="flex:1">
+        <label for="quality">Qualité</label>
+        <select id="quality">
+          <option value="high">Élevée — ombres douces</option>
+          <option value="med" selected>Moyenne — équilibré</option>
+          <option value="low">Basse — PC modeste</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="playBtn" style="flex:1">Explorer</button>
+      <button id="geoBtn">Ma position</button>
+    </div>
+    <div class="hint" id="coordHint">Aucun lieu choisi — Paris par défaut.</div>
+
+    <div class="keys">
+      <div><b>ZQSD / WASD</b> marcher</div>
+      <div><b>Souris</b> regarder</div>
+      <div><b>Maj</b> courir</div>
+      <div><b>Espace</b> sauter</div>
+      <div><b>F</b> mode vol</div>
+      <div><b>[ ]</b> heure du jour</div>
+      <div><b>T</b> temps qui défile</div>
+      <div><b>P</b> capture d'écran</div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== LOADING ====== -->
+<div class="overlay hide" id="loading">
+  <div class="card">
+    <h1 style="font-size:20px">Construction de la ville…</h1>
+    <p class="sub" style="margin-bottom:0">On télécharge la géométrie réelle du quartier, puis on extrude tout ça en 3D.</p>
+    <div class="bar"><i id="loadBar"></i></div>
+    <div id="loadMsg">Initialisation</div>
+  </div>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script>
+"use strict";
+/* =====================================================================
+   City Walk — balade 3D dans une vraie ville (données OpenStreetMap)
+   Aucune dépendance externe : Three.js est embarqué dans vendor/.
+   ===================================================================== */
+
+// Les couleurs sont écrites en sRGB (comme en CSS) : sans cette ligne, Three.js
+// les prendrait pour du linéaire et tout ressortirait délavé d'un cran.
+THREE.ColorManagement.enabled = true;
+
+/* ----------------------------- constantes ---------------------------- */
+const LEVEL_H = 3.3;            // hauteur d'un étage (m)
+const EYE_H = 1.68;             // hauteur des yeux (m)
+const PLAYER_R = 0.45;          // rayon de collision du joueur (m)
+const WALK = 4.2, RUN = 9.5, FLY = 34;
+const GRAVITY = 22, JUMP_V = 7.4;
+const CELL = 20;                // taille des cellules de la grille de collision (m)
+const MAX_BUILDINGS = 14000;
+const CACHE_VERSION = 3;
+
+const OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
+
+const BUILDING_COLORS = [
+  0xcfc4ae, 0xc3b7a1, 0xb8ad99, 0xcbbda4, 0xaba193, 0xd6ccbb,
+  0xb3a898, 0xc2b39c, 0xa79d92, 0xd0c4ae, 0xb6ab9b, 0xbdb3a5,
+  0xc2babd, 0xaaa7a4, 0xcdbfa3, 0xa5a29c,
+];
+const DEFAULT_HEIGHTS = {
+  house: 6.5, detached: 6.5, semidetached_house: 7, terrace: 8, bungalow: 4.5,
+  hut: 3, shed: 3, garage: 2.8, garages: 3.2, roof: 3.5, carport: 2.8,
+  apartments: 17, residential: 13, dormitory: 15, hotel: 20,
+  commercial: 15, retail: 10, office: 24, supermarket: 8, warehouse: 9,
+  industrial: 10, hospital: 20, school: 11, university: 16, college: 14,
+  church: 22, cathedral: 34, chapel: 12, mosque: 18, synagogue: 16,
+  train_station: 14, parking: 9, civic: 15, government: 18, public: 15,
+  stadium: 24, tower: 40, kiosk: 3,
+};
+const ROAD_WIDTHS = {
+  motorway: 14, motorway_link: 9, trunk: 12, trunk_link: 8,
+  primary: 11, primary_link: 7, secondary: 9.5, secondary_link: 6.5,
+  tertiary: 8, tertiary_link: 6, residential: 7, unclassified: 6.5,
+  living_street: 6, service: 4.2, pedestrian: 6, footway: 2.2,
+  path: 1.8, cycleway: 2.4, steps: 1.8, track: 3.2,
+};
+const ROAD_COLORS = {
+  motorway: 0x33373e, trunk: 0x33373e, primary: 0x373b43, secondary: 0x3a3e46,
+  tertiary: 0x3c4048, residential: 0x40444c, unclassified: 0x40444c,
+  living_street: 0x42464d, service: 0x44484f, pedestrian: 0x635747,
+  footway: 0x66594a, path: 0x685b4a, cycleway: 0x464858, steps: 0x66594a, track: 0x5f5340,
+};
+
+/* ------------------------------- état -------------------------------- */
+const S = {
+  origin: { lat: 48.8566, lon: 2.3522, label: "Paris, France" },
+  radius: 900,
+  quality: "med",
+  running: false,
+  paused: false,
+  time: 17.4,          // heure du jour [0,24)
+  autoTime: false,
+  fly: false,
+  photo: false,
+  yaw: 0, pitch: 0,
+  vel: new THREE.Vector3(),
+  pos: new THREE.Vector3(0, EYE_H, 0),
+  onGround: true,
+  keys: Object.create(null),
+  grid: new Map(),      // "cx,cz" -> [footprint]
+  footprints: [],
+  named: [],            // { name, x, z, kind }
+  roadPts: [],          // { name, x, z }
+  buildingCount: 0,
+  mapMeta: null,
+  treeSpots: [],        // candidats arbres { x, z, r }
+  lampSpots: [],        // { x, z }
+  lampGrid: new Map(),
+  greenRings: [],       // { pts, type }
+};
+
+/* ---------------------------- utilitaires ---------------------------- */
+const $ = (id) => document.getElementById(id);
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+
+/** Hash déterministe : même bâtiment => même couleur / même hauteur. */
+function hash(n) {
+  let x = (n | 0) ^ 0x9e3779b9;
+  x = Math.imul(x ^ (x >>> 16), 0x21f0aaad);
+  x = Math.imul(x ^ (x >>> 15), 0x735a2d97);
+  x = x ^ (x >>> 15);
+  return (x >>> 0) / 4294967295;
+}
+
+/** Projection locale équirectangulaire : degrés -> mètres autour de l'origine. */
+let mPerLon = 1, mPerLat = 111320;
+function setProjection(lat) {
+  mPerLat = 111132.92 - 559.82 * Math.cos(2 * lat * Math.PI / 180);
+  mPerLon = 111412.84 * Math.cos(lat * Math.PI / 180);
+}
+const projX = (lon) => (lon - S.origin.lon) * mPerLon;
+const projZ = (lat) => -(lat - S.origin.lat) * mPerLat;
+
+function toast(msg, ms) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.style.opacity = "0"; }, ms || 1800);
+}
+
+/* ======================================================================
+   1. RECHERCHE DE LIEU (Nominatim)
+   ====================================================================== */
+async function geocode(q) {
+  const url = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&addressdetails=1&q=" +
+    encodeURIComponent(q);
+  const r = await fetch(url, { headers: { "Accept-Language": navigator.language || "fr" } });
+  if (!r.ok) throw new Error("Recherche indisponible (" + r.status + ")");
+  return r.json();
+}
+
+/* ======================================================================
+   2. TÉLÉCHARGEMENT OSM (Overpass)
+   ====================================================================== */
+function overpassQuery(lat, lon, radius) {
+  // On demande la géométrie inline (out geom) pour éviter un second aller-retour.
+  const bbox = [
+    lat - radius / mPerLat, lon - radius / mPerLon,
+    lat + radius / mPerLat, lon + radius / mPerLon,
+  ].map((v) => v.toFixed(6)).join(",");
+  return `[out:json][timeout:120];
+(
+  way["building"](${bbox});
+  way["building:part"](${bbox});
+  way["highway"](${bbox});
+  way["natural"="water"](${bbox});
+  way["waterway"="riverbank"](${bbox});
+  way["landuse"~"^(grass|forest|meadow|village_green|cemetery|recreation_ground)$"](${bbox});
+  way["leisure"~"^(park|garden|pitch|playground)$"](${bbox});
+  way["natural"~"^(wood|scrub|sand|beach)$"](${bbox});
+);
+out geom;`;
+}
+
+async function fetchCity(lat, lon, radius, onStage) {
+  const key = `citywalk:${CACHE_VERSION}:${lat.toFixed(4)}:${lon.toFixed(4)}:${radius}`;
+  try {
+    const cached = localStorage.getItem(key);
+    if (cached) { onStage("Chargé depuis le cache local", 0.45); return JSON.parse(cached); }
+  } catch (e) { /* quota / mode privé : on ignore */ }
+
+  const body = "data=" + encodeURIComponent(overpassQuery(lat, lon, radius));
+  let lastErr = null;
+  for (let i = 0; i < OVERPASS.length; i++) {
+    onStage(`Téléchargement des données OSM (serveur ${i + 1}/${OVERPASS.length})…`, 0.12 + i * 0.05);
+    try {
+      const r = await fetch(OVERPASS[i], {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const json = await r.json();
+      if (!json.elements) throw new Error("réponse inattendue");
+      try { localStorage.setItem(key, JSON.stringify(json)); } catch (e) { /* trop gros */ }
+      return json;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Overpass injoignable");
+}
+
+/* ======================================================================
+   3. GÉOMÉTRIE
+   ====================================================================== */
+/** Aire signée d'un anneau (positif = sens antihoraire). */
+function signedArea(pts) {
+  let a = 0;
+  for (let i = 0, n = pts.length; i < n; i++) {
+    const p = pts[i], q = pts[(i + 1) % n];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+function buildingHeight(tags, id) {
+  let h = 0;
+  if (tags.height) h = parseFloat(String(tags.height).replace(",", "."));
+  else if (tags["building:levels"]) {
+    const lv = parseFloat(String(tags["building:levels"]).replace(",", "."));
+    if (isFinite(lv)) h = lv * LEVEL_H + 1.2;
+  }
+  if (!isFinite(h) || h <= 0) {
+    const type = tags.building && tags.building !== "yes" ? tags.building : tags["building:part"];
+    h = DEFAULT_HEIGHTS[type] || 12;
+    h *= 0.85 + hash(id) * 0.4;   // variation déterministe pour éviter l'effet "boîtes clonées"
+  }
+  if (tags["min_height"]) {
+    const mh = parseFloat(tags["min_height"]);
+    if (isFinite(mh) && mh < h) h -= mh;
+  }
+  return clamp(h, 2.2, 340);
+}
+
+/** Accumulateur de géométrie : tout est fusionné en un seul mesh par catégorie. */
+function makeSink() {
+  return { pos: [], nrm: [], col: [], count: 0 };
+}
+function pushGeometry(sink, geom, color) {
+  const g = geom.index ? geom.toNonIndexed() : geom;
+  const p = g.attributes.position.array;
+  const n = g.attributes.normal ? g.attributes.normal.array : null;
+  const c = new THREE.Color(color);
+  for (let i = 0; i < p.length; i++) sink.pos.push(p[i]);
+  if (n) { for (let i = 0; i < n.length; i++) sink.nrm.push(n[i]); }
+  else { for (let i = 0; i < p.length; i += 3) { sink.nrm.push(0, 1, 0); } }
+  const verts = p.length / 3;
+  for (let i = 0; i < verts; i++) sink.col.push(c.r, c.g, c.b);
+  sink.count += verts;
+  g.dispose();
+  if (g !== geom) geom.dispose();
+}
+function sinkToGeometry(sink) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(sink.pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(sink.nrm, 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(sink.col, 3));
+  g.computeBoundingSphere();
+  return g;
+}
+
+/** Bandeau plat le long d'une polyligne (route, chemin, rivière). */
+function pushRibbon(sink, pts, width, y, color) {
+  const hw = width / 2;
+  const c = new THREE.Color(color);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    let dx = b.x - a.x, dz = b.z - a.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.01) continue;
+    dx /= len; dz /= len;
+    const nx = -dz * hw, nz = dx * hw;
+    // quad a-b élargi + petit chevauchement aux jointures
+    const ex = dx * hw * 0.5, ez = dz * hw * 0.5;
+    // ordre des sommets antihoraire vu du dessus, sinon les triangles
+    // regardent vers le sol et disparaissent (back-face culling)
+    const v = [
+      a.x - nx - ex, y, a.z - nz - ez,
+      b.x + nx + ex, y, b.z + nz + ez,
+      b.x - nx + ex, y, b.z - nz + ez,
+      a.x - nx - ex, y, a.z - nz - ez,
+      a.x + nx - ex, y, a.z + nz - ez,
+      b.x + nx + ex, y, b.z + nz + ez,
+    ];
+    for (let k = 0; k < v.length; k++) sink.pos.push(v[k]);
+    for (let k = 0; k < 6; k++) { sink.nrm.push(0, 1, 0); sink.col.push(c.r, c.g, c.b); }
+    sink.count += 6;
+  }
+}
+
+/** Ligne axiale en pointillés au milieu de la chaussée. */
+function pushDashes(sink, pts, y, color) {
+  const dash = 3.0, gap = 5.5, w = 0.15;
+  let phase = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    let dx = b.x - a.x, dz = b.z - a.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.2) continue;
+    dx /= len; dz /= len;
+    let t = 0;
+    while (t < len) {
+      const cycle = (phase + t) % (dash + gap);
+      if (cycle < dash) {
+        const seg = Math.min(dash - cycle, len - t);
+        pushRibbon(sink, [
+          { x: a.x + dx * t, z: a.z + dz * t },
+          { x: a.x + dx * (t + seg), z: a.z + dz * (t + seg) },
+        ], w, y, color);
+        t += seg;
+      } else {
+        t += (dash + gap) - cycle;
+      }
+    }
+    phase = (phase + len) % (dash + gap);
+  }
+}
+
+/** Polygone plat rempli (parc, plan d'eau). */
+function pushFlatPolygon(sink, shapePts, y, color) {
+  if (shapePts.length < 3) return;
+  const shape = new THREE.Shape(shapePts);
+  let geom;
+  try { geom = new THREE.ShapeGeometry(shape); } catch (e) { return; }
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, y, 0);
+  pushGeometry(sink, geom, color);
+}
+
+/**
+ * Sème lampadaires et arbres d'alignement le long d'une voie.
+ * Les positions sont seulement des candidats : elles seront filtrées
+ * une fois tous les bâtiments connus (voir plantCity).
+ */
+function placeStreetFurniture(pts, width, hw) {
+  const lampEvery = 34, treeEvery = 24;
+  const offset = width / 2 + 1.9;
+  const alignedTrees = hw === "residential" || hw === "secondary" || hw === "tertiary" ||
+                       hw === "primary" || hw === "living_street" || hw === "unclassified";
+  let dist = 0, sinceLamp = lampEvery * 0.5, sinceTree = treeEvery * 0.7, side = 1;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    let dx = b.x - a.x, dz = b.z - a.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.5) continue;
+    dx /= len; dz /= len;
+    const nx = -dz, nz = dx;
+    let t = 0;
+    while (t < len) {
+      const step = Math.min(2.0, len - t);
+      t += step; dist += step; sinceLamp += step; sinceTree += step;
+      const px = a.x + dx * t, pz = a.z + dz * t;
+      if (sinceLamp >= lampEvery) {
+        sinceLamp = 0; side = -side;
+        S.lampSpots.push({ x: px + nx * offset * side, z: pz + nz * offset * side });
+      }
+      if (alignedTrees && sinceTree >= treeEvery) {
+        sinceTree = 0;
+        const s = hash(Math.round(px * 3) * 131 + Math.round(pz * 3)) < 0.5 ? 1 : -1;
+        S.treeSpots.push({ x: px + nx * (offset + 0.5) * s, z: pz + nz * (offset + 0.5) * s, r: 1.9 });
+      }
+    }
+  }
+}
+
+/** Arbres dans les espaces verts + arbres d'alignement, en InstancedMesh. */
+function plantCity() {
+  const MAX_TREES = 7000;
+
+  // semis dans les parcs et bois
+  for (const g of S.greenRings) {
+    const pts = g.pts;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+    }
+    const spacing = g.dense ? 9 : 15;
+    for (let x = minX; x < maxX; x += spacing) {
+      for (let z = minZ; z < maxZ; z += spacing) {
+        const h1 = hash(Math.round(x) * 7919 + Math.round(z) * 104729);
+        if (h1 > (g.dense ? 0.92 : 0.6)) continue;
+        const jx = x + (h1 - 0.5) * spacing * 0.7;
+        const jz = z + (hash(Math.round(z) * 7919 + Math.round(x)) - 0.5) * spacing * 0.7;
+        if (!pointInPolygon(jx, jz, pts)) continue;
+        S.treeSpots.push({ x: jx, z: jz, r: g.dense ? 2.4 : 3.1 });
+      }
+    }
+  }
+
+  // on retire ceux qui tombent dans un bâtiment
+  const spots = [];
+  for (const s of S.treeSpots) {
+    if (spots.length >= MAX_TREES) break;
+    if (collides(s.x, s.z, 1.1)) continue;
+    spots.push(s);
+  }
+  if (!spots.length) return;
+
+  const trunkGeom = new THREE.CylinderGeometry(0.16, 0.24, 1, 6, 1);
+  trunkGeom.translate(0, 0.5, 0);
+  const leafGeom = new THREE.IcosahedronGeometry(1, 1);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x50412f, roughness: 0.95 });
+  const leafMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88, flatShading: true });
+
+  const trunks = new THREE.InstancedMesh(trunkGeom, trunkMat, spots.length);
+  const leaves = new THREE.InstancedMesh(leafGeom, leafMat, spots.length);
+  leaves.castShadow = renderer.shadowMap.enabled;
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), pos = new THREE.Vector3();
+  const leafColors = [0x4f7a3a, 0x5c8a42, 0x446b33, 0x678f47, 0x3e6330, 0x7a9a4e];
+
+  for (let i = 0; i < spots.length; i++) {
+    const s = spots[i];
+    const h = hash(i * 977 + 13);
+    const height = (s.r > 2.6 ? 7.5 : 6.0) * (0.72 + h * 0.55);
+    const crown = s.r * (0.62 + hash(i * 31 + 7) * 0.4);
+
+    pos.set(s.x, 0, s.z);
+    sc.set(1 + h * 0.4, height * 0.62, 1 + h * 0.4);
+    m.compose(pos, q, sc);
+    trunks.setMatrixAt(i, m);
+
+    pos.set(s.x, height * 0.62 + crown * 0.55, s.z);
+    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), h * 6.28);
+    sc.set(crown, crown * (0.85 + h * 0.4), crown);
+    m.compose(pos, q, sc);
+    leaves.setMatrixAt(i, m);
+    q.identity();
+
+    leaves.setColorAt(i, new THREE.Color(leafColors[Math.floor(hash(i * 61 + 5) * leafColors.length)]));
+  }
+  trunks.instanceMatrix.needsUpdate = true;
+  leaves.instanceMatrix.needsUpdate = true;
+  if (leaves.instanceColor) leaves.instanceColor.needsUpdate = true;
+  scene.add(trunks, leaves);
+  S.treeCount = spots.length;
+}
+
+/* -------------------------- éclairage public ------------------------- */
+let lampHeadMat = null;
+const lampLights = [];
+
+function buildLamps() {
+  // on écarte les lampadaires plantés dans un mur
+  const spots = S.lampSpots.filter((s) => !collides(s.x, s.z, 0.6)).slice(0, 6000);
+  S.lampSpots = spots;
+  if (!spots.length) return;
+
+  const H = 5.2;
+  const poleGeom = new THREE.CylinderGeometry(0.075, 0.11, H, 5, 1);
+  poleGeom.translate(0, H / 2, 0);
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.6, metalness: 0.35 });
+  const headGeom = new THREE.BoxGeometry(0.85, 0.16, 0.34);
+  lampHeadMat = new THREE.MeshStandardMaterial({
+    color: 0x14181d, emissive: new THREE.Color(0xffcf8a), emissiveIntensity: 0, roughness: 0.5,
+  });
+
+  const poles = new THREE.InstancedMesh(poleGeom, poleMat, spots.length);
+  const heads = new THREE.InstancedMesh(headGeom, lampHeadMat, spots.length);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3();
+  for (let i = 0; i < spots.length; i++) {
+    p.set(spots[i].x, 0, spots[i].z);
+    m.compose(p, q, sc);
+    poles.setMatrixAt(i, m);
+    p.set(spots[i].x, H, spots[i].z);
+    m.compose(p, q, sc);
+    heads.setMatrixAt(i, m);
+
+    const k = Math.floor(spots[i].x / 40) + "," + Math.floor(spots[i].z / 40);
+    let arr = S.lampGrid.get(k);
+    if (!arr) { arr = []; S.lampGrid.set(k, arr); }
+    arr.push(spots[i]);
+  }
+  poles.instanceMatrix.needsUpdate = true;
+  heads.instanceMatrix.needsUpdate = true;
+  scene.add(poles, heads);
+
+  // petit pool de vraies lumières, réaffectées aux lampadaires les plus proches
+  const n = S.quality === "low" ? 4 : S.quality === "med" ? 7 : 10;
+  for (let i = 0; i < n; i++) {
+    const l = new THREE.PointLight(0xffc27a, 0, 34, 1.4);
+    l.visible = false;
+    scene.add(l);
+    lampLights.push(l);
+  }
+}
+
+/** Réaffecte le pool de lumières aux lampadaires proches du joueur. */
+const _near = [];
+function updateLampLights() {
+  if (!lampLights.length) return;
+  const on = uNight.value > 0.06;
+  if (lampHeadMat) lampHeadMat.emissiveIntensity = uNight.value * 2.6;
+  if (!on) {
+    for (const l of lampLights) l.visible = false;
+    return;
+  }
+  _near.length = 0;
+  const cx = Math.floor(S.pos.x / 40), cz = Math.floor(S.pos.z / 40);
+  for (let i = -1; i <= 1; i++) {
+    for (let j = -1; j <= 1; j++) {
+      const arr = S.lampGrid.get((cx + i) + "," + (cz + j));
+      if (!arr) continue;
+      for (const s of arr) {
+        const d = (s.x - S.pos.x) ** 2 + (s.z - S.pos.z) ** 2;
+        if (d < 3600) _near.push({ s, d });
+      }
+    }
+  }
+  _near.sort((a, b) => a.d - b.d);
+  for (let i = 0; i < lampLights.length; i++) {
+    const l = lampLights[i];
+    if (i < _near.length) {
+      l.position.set(_near[i].s.x, 5.0, _near[i].s.z);
+      l.intensity = uNight.value * 2.6;
+      l.visible = true;
+    } else l.visible = false;
+  }
+}
+
+/* ------------------------- grille de collision ----------------------- */
+function addCollider(fp) {
+  S.footprints.push(fp);
+  const x0 = Math.floor(fp.minX / CELL), x1 = Math.floor(fp.maxX / CELL);
+  const z0 = Math.floor(fp.minZ / CELL), z1 = Math.floor(fp.maxZ / CELL);
+  for (let cx = x0; cx <= x1; cx++) {
+    for (let cz = z0; cz <= z1; cz++) {
+      const k = cx + "," + cz;
+      let arr = S.grid.get(k);
+      if (!arr) { arr = []; S.grid.set(k, arr); }
+      arr.push(fp);
+    }
+  }
+}
+function pointInPolygon(x, z, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, zi = pts[i].z, xj = pts[j].x, zj = pts[j].z;
+    if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function distToEdges(x, z, pts) {
+  let best = Infinity;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const ax = pts[j].x, az = pts[j].z, bx = pts[i].x, bz = pts[i].z;
+    const dx = bx - ax, dz = bz - az;
+    const l2 = dx * dx + dz * dz;
+    let t = l2 > 0 ? ((x - ax) * dx + (z - az) * dz) / l2 : 0;
+    t = clamp(t, 0, 1);
+    const px = ax + t * dx - x, pz = az + t * dz - z;
+    const d = Math.hypot(px, pz);
+    if (d < best) best = d;
+  }
+  return best;
+}
+/** Le joueur (cercle de rayon r) touche-t-il un bâtiment en (x,z) ? */
+function collides(x, z, r, maxY) {
+  const cx = Math.floor(x / CELL), cz = Math.floor(z / CELL);
+  for (let i = -1; i <= 1; i++) {
+    for (let j = -1; j <= 1; j++) {
+      const arr = S.grid.get((cx + i) + "," + (cz + j));
+      if (!arr) continue;
+      for (let k = 0; k < arr.length; k++) {
+        const fp = arr[k];
+        if (maxY !== undefined && maxY > fp.height) continue;   // on survole le toit
+        if (x < fp.minX - r || x > fp.maxX + r || z < fp.minZ - r || z > fp.maxZ + r) continue;
+        if (pointInPolygon(x, z, fp.pts)) return fp;
+        if (distToEdges(x, z, fp.pts) < r) return fp;
+      }
+    }
+  }
+  return null;
+}
+
+/* ======================================================================
+   4. CONSTRUCTION DE LA VILLE
+   ====================================================================== */
+let renderer, scene, camera, sun, hemi, sky, stars, cityMesh, groundMeshes = [];
+const uNight = { value: 0 };
+const uSunDir = { value: new THREE.Vector3(0, 1, 0) };
+const uSkyTop = { value: new THREE.Color() };
+const uSkyBot = { value: new THREE.Color() };
+
+function buildCity(data, onStage) {
+  const buildings = makeSink();
+  const roads = makeSink();
+  const walks = makeSink();
+  const marks = makeSink();
+  const paths = makeSink();
+  const water = makeSink();
+  const green = makeSink();
+
+  const els = data.elements || [];
+  onStage("Extrusion des bâtiments…", 0.62);
+
+  let nb = 0;
+  for (let i = 0; i < els.length; i++) {
+    const el = els[i];
+    if (el.type !== "way" || !el.geometry) continue;
+    const tags = el.tags || {};
+    const geo = el.geometry;
+
+    // -- points projetés (on ignore les nœuds manquants hors bbox)
+    const pts = [];
+    for (let k = 0; k < geo.length; k++) {
+      const g = geo[k];
+      if (!g || g.lat === undefined) continue;
+      pts.push({ x: projX(g.lon), z: projZ(g.lat) });
+    }
+    if (pts.length < 2) continue;
+
+    const closed = pts.length > 3 &&
+      Math.abs(pts[0].x - pts[pts.length - 1].x) < 0.05 &&
+      Math.abs(pts[0].z - pts[pts.length - 1].z) < 0.05;
+
+    /* ---------- bâtiments ---------- */
+    if ((tags.building || tags["building:part"]) && closed && nb < MAX_BUILDINGS) {
+      const ring = pts.slice(0, -1);
+      if (ring.length < 3) continue;
+
+      // Shape en 2D : (x, -z) pour que rotateX(-90°) remette le plan à l'endroit.
+      let shapePts = ring.map((p) => new THREE.Vector2(p.x, -p.z));
+      if (signedArea(shapePts) < 0) shapePts.reverse();   // normales vers l'extérieur
+
+      const h = buildingHeight(tags, el.id);
+      let geom;
+      try {
+        geom = new THREE.ExtrudeGeometry(new THREE.Shape(shapePts), {
+          depth: h, bevelEnabled: false, curveSegments: 1,
+        });
+      } catch (e) { continue; }
+      geom.rotateX(-Math.PI / 2);
+      pushGeometry(buildings, geom, BUILDING_COLORS[Math.floor(hash(el.id * 7 + 3) * BUILDING_COLORS.length)]);
+
+      // collider + bbox
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, cxs = 0, czs = 0;
+      for (let k = 0; k < ring.length; k++) {
+        const p = ring[k];
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+        cxs += p.x; czs += p.z;
+      }
+      addCollider({ pts: ring, minX, maxX, minZ, maxZ, height: h });
+      nb++;
+
+      if (tags.name) {
+        S.named.push({ name: tags.name, x: cxs / ring.length, z: czs / ring.length, kind: describeKind(tags) });
+      }
+      continue;
+    }
+
+    /* ---------- routes et chemins ---------- */
+    if (tags.highway) {
+      const hw = tags.highway;
+      const w = ROAD_WIDTHS[hw] || 5;
+      const soft = hw === "footway" || hw === "path" || hw === "cycleway" || hw === "steps" ||
+                   hw === "track" || hw === "pedestrian";
+      const lanes = parseFloat(tags.lanes);
+      const width = isFinite(lanes) && lanes > 2 ? Math.max(w, lanes * 3.1) : w;
+      if (soft) {
+        pushRibbon(paths, pts, width, 0.05, ROAD_COLORS[hw] || 0x6d6459);
+      } else {
+        // trottoir (bandeau plus large et plus clair) puis chaussée par-dessus
+        pushRibbon(walks, pts, width + 4.4, 0.035, 0x736e61);
+        pushRibbon(roads, pts, width, 0.075, ROAD_COLORS[hw] || 0x40444c);
+        if (width >= 7 && hw !== "service" && hw !== "living_street") {
+          pushDashes(marks, pts, 0.092, 0xcdc6ae);
+        }
+        placeStreetFurniture(pts, width, hw);
+      }
+
+      if (tags.name) {
+        // on échantillonne la polyligne : noms de rue, minimap et point d'apparition
+        const step = Math.max(1, Math.floor(pts.length / 12));
+        for (let k = 0; k < pts.length; k += step) {
+          const a = pts[Math.max(0, k - 1)], b = pts[Math.min(pts.length - 1, k + 1)];
+          S.roadPts.push({
+            name: tags.name, x: pts[k].x, z: pts[k].z,
+            dir: Math.atan2(-(b.x - a.x), -(b.z - a.z)),   // yaw regardant le long de la rue
+          });
+        }
+      }
+      continue;
+    }
+
+    /* ---------- eau ---------- */
+    if (tags.natural === "water" || tags.waterway === "riverbank") {
+      if (closed) pushFlatPolygon(water, pts.slice(0, -1).map((p) => new THREE.Vector2(p.x, -p.z)), 0.12, 0x2c5f7a);
+      continue;
+    }
+
+    /* ---------- végétation ---------- */
+    if (tags.leisure || tags.landuse || tags.natural) {
+      const t = tags.leisure || tags.landuse || tags.natural;
+      let col = 0x3d5531;
+      if (t === "forest" || t === "wood") col = 0x2f4728;
+      else if (t === "sand" || t === "beach") col = 0x8a7d57;
+      else if (t === "pitch" || t === "playground") col = 0x435e31;
+      else if (t === "cemetery") col = 0x3a4e31;
+      if (closed) {
+        const ring = pts.slice(0, -1);
+        pushFlatPolygon(green, ring.map((p) => new THREE.Vector2(p.x, -p.z)), 0.03, col);
+        if (t === "park" || t === "garden" || t === "forest" || t === "wood" ||
+            t === "grass" || t === "village_green" || t === "cemetery" || t === "recreation_ground") {
+          S.greenRings.push({ pts: ring, dense: t === "forest" || t === "wood" });
+        }
+      }
+      continue;
+    }
+  }
+
+  S.buildingCount = nb;
+  onStage("Assemblage de la scène…", 0.82);
+
+  /* ---------- matériaux ---------- */
+  const buildingMat = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.82, metalness: 0.02, flatShading: false,
+  });
+  applyFacadeShader(buildingMat);
+
+  const flatMat = (extra) => new THREE.MeshStandardMaterial(Object.assign({
+    vertexColors: true, roughness: 0.9, metalness: 0.0,
+  }, extra || {}));
+
+  if (buildings.count) {
+    cityMesh = new THREE.Mesh(sinkToGeometry(buildings), buildingMat);
+    cityMesh.castShadow = true;
+    cityMesh.receiveShadow = true;
+    scene.add(cityMesh);
+  }
+  const layers = [
+    [green, flatMat(), false],
+    [water, flatMat({ roughness: 0.18, metalness: 0.5 }), false],
+    [walks, flatMat(), true],
+    [roads, flatMat(), true],
+    [marks, flatMat({ roughness: 0.75 }), false],
+    [paths, flatMat(), true],
+  ];
+  for (const [sink, mat, recv] of layers) {
+    if (!sink.count) continue;
+    const m = new THREE.Mesh(sinkToGeometry(sink), mat);
+    m.receiveShadow = recv;
+    scene.add(m);
+    groundMeshes.push(m);
+  }
+}
+
+function describeKind(tags) {
+  if (tags.amenity) return tags.amenity.replace(/_/g, " ");
+  if (tags.shop) return "commerce · " + tags.shop.replace(/_/g, " ");
+  if (tags.tourism) return tags.tourism.replace(/_/g, " ");
+  if (tags.building && tags.building !== "yes") return tags.building.replace(/_/g, " ");
+  return "";
+}
+
+/**
+ * Injecte des fenêtres procédurales dans le shader standard :
+ * grille calculée depuis la position monde, allumée la nuit, et toits assombris.
+ */
+function applyFacadeShader(mat) {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uNight = uNight;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vWPos;\nvarying vec3 vWNrm;")
+      .replace("#include <project_vertex>",
+        "#include <project_vertex>\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n vWNrm = normalize(mat3(modelMatrix) * objectNormal);");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vWPos;\nvarying vec3 vWNrm;\nuniform float uNight;")
+      .replace("vec3 totalEmissiveRadiance = emissive;", `
+        vec3 totalEmissiveRadiance = emissive;
+        if (vWNrm.y > 0.86) {
+          // toiture : plus sombre et légèrement grisée
+          diffuseColor.rgb = mix(diffuseColor.rgb * 0.55, vec3(0.24, 0.24, 0.26), 0.45);
+        } else if (vWPos.y > 1.4) {
+          float floorH = ${LEVEL_H.toFixed(2)};
+          float winW = 2.75;
+          float u = (abs(vWNrm.x) > abs(vWNrm.z)) ? vWPos.z : vWPos.x;
+          float fu = fract(u / winW);
+          float fv = fract((vWPos.y - 1.1) / floorH);
+          float win = step(0.17, fu) * step(fu, 0.78) * step(0.28, fv) * step(fv, 0.82);
+          float cell = floor(u / winW) * 37.0 + floor((vWPos.y - 1.1) / floorH) * 11.0;
+          float lit = step(0.52, fract(sin(cell) * 43758.5453));
+          diffuseColor.rgb *= mix(1.0, 0.42, win * 0.85);
+          totalEmissiveRadiance += vec3(1.0, 0.76, 0.44) * win * lit * uNight * 1.15;
+          // léger soubassement plus sombre au niveau de la rue
+          diffuseColor.rgb *= mix(0.72, 1.0, smoothstep(1.4, 4.5, vWPos.y));
+        }
+      `);
+  };
+}
+
+/* ======================================================================
+   5. CIEL, SOLEIL, HEURE
+   ====================================================================== */
+function buildSky() {
+  const geom = new THREE.SphereGeometry(9000, 32, 16);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false,
+    uniforms: { uTop: uSkyTop, uBot: uSkyBot, uSun: uSunDir, uNight: uNight },
+    vertexShader: `
+      varying vec3 vDir;
+      void main() {
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      uniform vec3 uTop; uniform vec3 uBot; uniform vec3 uSun; uniform float uNight;
+      varying vec3 vDir;
+      void main() {
+        float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 col = mix(uBot, uTop, pow(h, 0.75));
+        float d = max(dot(normalize(vDir), normalize(uSun)), 0.0);
+        // halo + disque solaire
+        col += vec3(1.0, 0.72, 0.38) * pow(d, 14.0) * 0.75 * (1.0 - uNight * 0.85);
+        col += vec3(1.0, 0.95, 0.85) * pow(d, 900.0) * 3.0 * (1.0 - uNight);
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  });
+  sky = new THREE.Mesh(geom, mat);
+  sky.frustumCulled = false;
+  scene.add(sky);
+
+  // étoiles
+  const N = 1400, arr = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const u = Math.random() * Math.PI * 2, v = Math.random();
+    const y = v * 0.98 + 0.02, r = Math.sqrt(1 - y * y);
+    arr[i * 3] = Math.cos(u) * r * 8000;
+    arr[i * 3 + 1] = y * 8000;
+    arr[i * 3 + 2] = Math.sin(u) * r * 8000;
+  }
+  const sg = new THREE.BufferGeometry();
+  sg.setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
+  stars = new THREE.Points(sg, new THREE.PointsMaterial({
+    color: 0xffffff, size: 2.2, sizeAttenuation: false, transparent: true, opacity: 0, depthWrite: false,
+  }));
+  stars.frustumCulled = false;
+  scene.add(stars);
+}
+
+const DAY = { top: new THREE.Color(0x3f7fc4), bot: new THREE.Color(0xbcd6ea) };
+const DUSK = { top: new THREE.Color(0x27436b), bot: new THREE.Color(0xdd8b58) };
+const NIGHT = { top: new THREE.Color(0x040911), bot: new THREE.Color(0x122033) };
+
+function updateSun() {
+  // course solaire simplifiée : lever ~6h, coucher ~21h
+  const ang = ((S.time - 6) / 15) * Math.PI;
+  const elev = Math.sin(ang);
+  const azim = (S.time / 24) * Math.PI * 2 - Math.PI * 0.5;
+  uSunDir.value.set(Math.cos(azim) * Math.max(0.18, Math.abs(Math.cos(ang))), Math.max(-0.35, elev), Math.sin(azim)).normalize();
+
+  const night = 1 - smooth(-0.12, 0.16, elev);
+  const dusk = smooth(0.36, 0.02, elev) * (1 - night);
+  uNight.value = night;
+
+  const top = new THREE.Color().copy(DAY.top).lerp(DUSK.top, dusk).lerp(NIGHT.top, night);
+  const bot = new THREE.Color().copy(DAY.bot).lerp(DUSK.bot, dusk).lerp(NIGHT.bot, night);
+  uSkyTop.value.copy(top);
+  uSkyBot.value.copy(bot);
+  if (scene.fog) scene.fog.color.copy(bot).multiplyScalar(0.78);
+  if (stars) stars.material.opacity = night * 0.9;
+
+  const sunCol = new THREE.Color(0xfff2df).lerp(new THREE.Color(0xff9a52), dusk).lerp(new THREE.Color(0x9fb6d8), night);
+  sun.color.copy(sunCol);
+  sun.intensity = lerp(0.10, 1.85, smooth(-0.1, 0.35, elev));
+  hemi.intensity = lerp(0.20, 0.62, smooth(-0.12, 0.3, elev));
+  hemi.color.copy(bot);
+  hemi.groundColor.set(night > 0.5 ? 0x0b1118 : 0x5c5648);
+  renderer.toneMappingExposure = lerp(1.18, 0.92, smooth(-0.1, 0.3, elev));
+}
+
+/* ======================================================================
+   6. MINIMAP
+   ====================================================================== */
+function buildMinimap() {
+  const px = 1400;
+  const span = S.radius * 2.2;
+  const c = document.createElement("canvas");
+  c.width = c.height = px;
+  const g = c.getContext("2d");
+  const s = px / span;
+  const toPx = (x, z) => [(x + span / 2) * s, (z + span / 2) * s];
+
+  g.fillStyle = "#111a24"; g.fillRect(0, 0, px, px);
+
+  // routes
+  g.strokeStyle = "#39434f"; g.lineCap = "round";
+  const byName = new Map();
+  for (const rp of S.roadPts) {
+    if (!byName.has(rp.name)) byName.set(rp.name, []);
+    byName.get(rp.name).push(rp);
+  }
+  g.lineWidth = Math.max(1.2, 6 * s);
+  for (const pts of byName.values()) {
+    g.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const [a, b] = toPx(pts[i].x, pts[i].z);
+      i ? g.lineTo(a, b) : g.moveTo(a, b);
+    }
+    g.stroke();
+  }
+
+  // bâtiments
+  g.fillStyle = "#7e8899";
+  for (const fp of S.footprints) {
+    g.beginPath();
+    for (let i = 0; i < fp.pts.length; i++) {
+      const [a, b] = toPx(fp.pts[i].x, fp.pts[i].z);
+      i ? g.lineTo(a, b) : g.moveTo(a, b);
+    }
+    g.closePath(); g.fill();
+  }
+
+  S.mapMeta = { canvas: c, px, span, s };
+}
+
+function drawMinimap() {
+  const cv = $("minimap");
+  if (!S.mapMeta) return;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = cv.clientWidth * dpr, h = cv.clientHeight * dpr;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const g = cv.getContext("2d");
+  const { canvas, px, span, s } = S.mapMeta;
+  const viewM = 260;                       // mètres visibles sur la minimap
+  const sw = viewM * s;
+  const cxp = (S.pos.x + span / 2) * s, czp = (S.pos.z + span / 2) * s;
+
+  g.fillStyle = "#0d141c"; g.fillRect(0, 0, w, h);
+  g.drawImage(canvas, cxp - sw / 2, czp - sw / 2, sw, sw, 0, 0, w, h);
+
+  // joueur
+  g.save();
+  g.translate(w / 2, h / 2);
+  g.rotate(-S.yaw);
+  g.fillStyle = "#56b6ff";
+  g.beginPath();
+  g.moveTo(0, -8 * dpr); g.lineTo(5.5 * dpr, 7 * dpr); g.lineTo(0, 4 * dpr); g.lineTo(-5.5 * dpr, 7 * dpr);
+  g.closePath(); g.fill();
+  g.restore();
+  g.strokeStyle = "rgba(255,255,255,.10)";
+  g.strokeRect(0.5, 0.5, w - 1, h - 1);
+}
+
+/* ======================================================================
+   7. JOUEUR
+   ====================================================================== */
+/** Point d'apparition : sur une rue proche du centre, face à l'axe de la rue. */
+function findSpawn() {
+  const candidates = [];
+  for (const rp of S.roadPts) {
+    const d = Math.hypot(rp.x, rp.z);
+    if (d < S.radius * 0.5) candidates.push({ p: rp, d });
+  }
+  candidates.sort((a, b) => a.d - b.d);
+  for (let i = 0; i < Math.min(candidates.length, 400); i++) {
+    const p = candidates[i].p;
+    if (!collides(p.x, p.z, PLAYER_R + 0.4)) {
+      return { pos: new THREE.Vector3(p.x, EYE_H, p.z), yaw: p.dir || 0 };
+    }
+  }
+  for (let r = 0; r < 600; r += 4) {
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) {
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (!collides(x, z, PLAYER_R + 0.3)) {
+        return { pos: new THREE.Vector3(x, EYE_H, z), yaw: a };
+      }
+    }
+  }
+  return { pos: new THREE.Vector3(0, EYE_H, 0), yaw: 0 };
+}
+
+function moveWithCollision(dx, dz) {
+  const y = S.pos.y;
+  const feet = y - EYE_H;
+  const flying = S.fly && feet > 0.5;
+  if (flying) {
+    // en vol, on ne bloque que si on traverse un bâtiment plus haut que nous
+    if (!collides(S.pos.x + dx, S.pos.z + dz, PLAYER_R, feet)) { S.pos.x += dx; S.pos.z += dz; return; }
+    if (!collides(S.pos.x + dx, S.pos.z, PLAYER_R, feet)) S.pos.x += dx;
+    if (!collides(S.pos.x, S.pos.z + dz, PLAYER_R, feet)) S.pos.z += dz;
+    return;
+  }
+  if (!collides(S.pos.x + dx, S.pos.z + dz, PLAYER_R)) { S.pos.x += dx; S.pos.z += dz; return; }
+  if (!collides(S.pos.x + dx, S.pos.z, PLAYER_R)) S.pos.x += dx;          // glissement le long des murs
+  else if (!collides(S.pos.x, S.pos.z + dz, PLAYER_R)) S.pos.z += dz;
+}
+
+function updatePlayer(dt) {
+  const k = S.keys;
+  const fwd = (k["w"] || k["z"] || k["arrowup"] ? 1 : 0) - (k["s"] || k["arrowdown"] ? 1 : 0);
+  const str = (k["d"] || k["arrowright"] ? 1 : 0) - (k["a"] || k["q"] || k["arrowleft"] ? 1 : 0);
+  const run = k["shift"];
+  const speed = S.fly ? (run ? FLY * 2.4 : FLY) : (run ? RUN : WALK);
+
+  let vx = 0, vz = 0;
+  if (fwd || str) {
+    const sin = Math.sin(S.yaw), cos = Math.cos(S.yaw);
+    // avant = -Z tourné par yaw
+    let ax = -sin * fwd + cos * str;
+    let az = -cos * fwd - sin * str;
+    const l = Math.hypot(ax, az);
+    ax /= l; az /= l;
+    vx = ax * speed; vz = az * speed;
+  }
+  moveWithCollision(vx * dt, vz * dt);
+
+  if (S.fly) {
+    let vy = 0;
+    if (k[" "]) vy += 1;
+    if (k["control"] || k["c"]) vy -= 1;
+    S.pos.y = clamp(S.pos.y + vy * speed * dt, 1.0, 1400);
+    S.vel.y = 0;
+    S.onGround = false;
+  } else {
+    S.vel.y -= GRAVITY * dt;
+    S.pos.y += S.vel.y * dt;
+    if (S.pos.y <= EYE_H) { S.pos.y = EYE_H; S.vel.y = 0; S.onGround = true; }
+    else S.onGround = false;
+    if (k[" "] && S.onGround) { S.vel.y = JUMP_V; S.onGround = false; }
+  }
+
+  // limite de la zone chargée
+  const d = Math.hypot(S.pos.x, S.pos.z);
+  const lim = S.radius * 1.25;
+  if (d > lim) { S.pos.x *= lim / d; S.pos.z *= lim / d; }
+
+  camera.position.copy(S.pos);
+  camera.rotation.set(S.pitch, S.yaw, 0, "YXZ");
+}
+
+/** Nom du lieu visé (bâtiment nommé proche, sinon rue). */
+function updatePlaceLabel() {
+  let best = null, bestD = 55;
+  for (const n of S.named) {
+    const dx = n.x - S.pos.x, dz = n.z - S.pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  let text = "";
+  if (best) text = best.kind ? best.name + " · " + best.kind : best.name;
+  else {
+    let rd = 26, rn = null;
+    for (const rp of S.roadPts) {
+      const d = Math.hypot(rp.x - S.pos.x, rp.z - S.pos.z);
+      if (d < rd) { rd = d; rn = rp.name; }
+    }
+    if (rn) text = rn;
+  }
+  const el = $("place");
+  el.textContent = text;
+  el.style.opacity = text ? "1" : "0";
+}
+
+/* ======================================================================
+   8. BOUCLE
+   ====================================================================== */
+let lastT = 0, fps = 0, fpsAcc = 0, fpsN = 0, placeTimer = 0;
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (!S.running) return;
+  const dt = Math.min((t - lastT) / 1000 || 0, 0.05);
+  lastT = t;
+
+  if (!S.paused) {
+    updatePlayer(dt);
+    if (S.autoTime) { S.time = (S.time + dt * 0.35) % 24; updateSun(); }
+  }
+
+  // le soleil suit le joueur pour garder des ombres nettes
+  const sd = uSunDir.value;
+  sun.position.set(S.pos.x + sd.x * 320, S.pos.y + sd.y * 320 + 60, S.pos.z + sd.z * 320);
+  sun.target.position.set(S.pos.x, 0, S.pos.z);
+  sun.target.updateMatrixWorld();
+  sky.position.set(S.pos.x, 0, S.pos.z);
+  stars.position.set(S.pos.x, 0, S.pos.z);
+  updateLampLights();
+
+  renderer.render(scene, camera);
+
+  // cadence du HUD basée sur l'horloge réelle (pas sur dt plafonné)
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc > 0.5) { fps = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; }
+  if (t - placeTimer > 250 && !S.photo) { placeTimer = t; updatePlaceLabel(); drawHud(); }
+}
+
+function drawHud() {
+  drawMinimap();
+  const hh = Math.floor(S.time), mm = Math.floor((S.time - hh) * 60);
+  $("clock").textContent = String(hh).padStart(2, "0") + ":" + String(mm).padStart(2, "0") +
+    (S.autoTime ? "  ⏩" : "");
+  $("stats").innerHTML =
+    `<b>${S.origin.label}</b><br>` +
+    `${S.buildingCount.toLocaleString("fr-FR")} bâtiments · ${(S.treeCount || 0).toLocaleString("fr-FR")} arbres · ${fps} fps<br>` +
+    `alt. ${(S.pos.y - EYE_H).toFixed(0)} m` + (S.fly ? " · <b>vol</b>" : "");
+}
+
+/* ======================================================================
+   9. INITIALISATION
+   ====================================================================== */
+function initThree() {
+  renderer = new THREE.WebGLRenderer({ antialias: S.quality !== "low", powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, S.quality === "high" ? 2 : 1.5));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.enabled = S.quality !== "low";
+  renderer.shadowMap.type = S.quality === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  $("app").appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0xbcd6ea, S.radius * 0.5, S.radius * 1.9);
+
+  camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 12000);
+
+  hemi = new THREE.HemisphereLight(0xbcd6ea, 0x5c5648, 0.6);
+  scene.add(hemi);
+
+  sun = new THREE.DirectionalLight(0xfff2df, 1.85);
+  sun.castShadow = renderer.shadowMap.enabled;
+  const shadowSpan = S.quality === "high" ? 170 : 120;
+  sun.shadow.mapSize.set(S.quality === "high" ? 2048 : 1024, S.quality === "high" ? 2048 : 1024);
+  sun.shadow.camera.left = -shadowSpan; sun.shadow.camera.right = shadowSpan;
+  sun.shadow.camera.top = shadowSpan; sun.shadow.camera.bottom = -shadowSpan;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 900;
+  sun.shadow.bias = -0.0012;
+  sun.shadow.normalBias = 0.045;
+  scene.add(sun);
+  scene.add(sun.target);
+
+  // sol
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(S.radius * 8, S.radius * 8),
+    new THREE.MeshStandardMaterial({ color: 0x4c5044, roughness: 0.97 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = renderer.shadowMap.enabled;
+  scene.add(ground);
+
+  buildSky();
+  addEventListener("resize", () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+}
+
+/* --------------------------- entrées clavier -------------------------- */
+function initInput() {
+  const canvas = renderer.domElement;
+
+  addEventListener("keydown", (e) => {
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+    S.keys[k] = true;
+    if (k === " ") e.preventDefault();
+    if (!S.running) return;
+    if (k === "f") { S.fly = !S.fly; S.vel.y = 0; toast(S.fly ? "Mode vol activé (Espace / C)" : "Mode marche"); }
+    if (k === "t") { S.autoTime = !S.autoTime; toast(S.autoTime ? "Le temps défile" : "Temps figé"); }
+    if (k === "[") { S.time = (S.time + 23.5) % 24; updateSun(); }
+    if (k === "]") { S.time = (S.time + 0.5) % 24; updateSun(); }
+    if (k === "p") screenshot();
+    if (k === "h") $("hud").classList.toggle("on");
+  });
+  addEventListener("keyup", (e) => { S.keys[e.key.toLowerCase()] = false; });
+  addEventListener("blur", () => { S.keys = Object.create(null); });
+
+  canvas.addEventListener("click", () => { if (S.running) canvas.requestPointerLock(); });
+  $("pauseHint").addEventListener("click", () => canvas.requestPointerLock());
+
+  document.addEventListener("pointerlockchange", () => {
+    const locked = document.pointerLockElement === canvas;
+    S.paused = !locked;
+    $("pauseHint").classList.toggle("on", !locked && S.running);
+    if (!locked) S.keys = Object.create(null);
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (document.pointerLockElement !== canvas) return;
+    const sens = 0.0022;
+    S.yaw -= e.movementX * sens;
+    S.pitch = clamp(S.pitch - e.movementY * sens, -Math.PI / 2 + 0.02, Math.PI / 2 - 0.02);
+  });
+}
+
+function screenshot() {
+  S.photo = true;
+  $("hud").classList.remove("on");
+  requestAnimationFrame(() => {
+    renderer.render(scene, camera);
+    const url = renderer.domElement.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "citywalk-" + Date.now() + ".png";
+    a.click();
+    S.photo = false;
+    $("hud").classList.add("on");
+    toast("Capture enregistrée");
+  });
+}
+
+/* ------------------------------ démarrage ---------------------------- */
+function stage(msg, p) {
+  $("loadMsg").textContent = msg;
+  $("loadBar").style.width = Math.round(clamp(p, 0, 1) * 100) + "%";
+}
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+async function start() {
+  $("menu").classList.add("hide");
+  $("loading").classList.remove("hide");
+  stage("Initialisation du moteur 3D…", 0.05);
+  await nextFrame();
+
+  setProjection(S.origin.lat);
+  initThree();
+  initInput();
+  updateSun();
+
+  let data;
+  try {
+    data = await fetchCity(S.origin.lat, S.origin.lon, S.radius, stage);
+  } catch (e) {
+    stage("Overpass injoignable — génération d'une ville de secours…", 0.5);
+    await nextFrame();
+    data = proceduralCity(S.radius);
+  }
+
+  stage("Analyse de " + (data.elements || []).length.toLocaleString("fr-FR") + " éléments…", 0.55);
+  await nextFrame();
+  buildCity(data, stage);
+
+  stage("Plantation des arbres…", 0.86);
+  await nextFrame();
+  plantCity();
+
+  stage("Installation de l'éclairage public…", 0.88);
+  await nextFrame();
+  buildLamps();
+
+  stage("Préparation de la minimap…", 0.9);
+  await nextFrame();
+  buildMinimap();
+
+  const spawn = findSpawn();
+  S.pos.copy(spawn.pos);
+  S.yaw = spawn.yaw;
+  camera.position.copy(S.pos);
+  camera.rotation.set(0, S.yaw, 0, "YXZ");
+
+  stage("Prêt !", 1);
+  await nextFrame();
+  $("loading").classList.add("hide");
+  $("hud").classList.add("on");
+  S.running = true;
+  S.paused = true;
+  $("pauseHint").classList.add("on");
+  drawHud();
+  lastT = performance.now();
+}
+
+/* ---------- ville de secours (si Overpass est indisponible) ---------- */
+function proceduralCity(radius) {
+  const els = [];
+  let id = 1;
+  const R = radius * 0.95;
+  const block = 78, street = 16;
+  const toLat = (z) => S.origin.lat - z / mPerLat;
+  const toLon = (x) => S.origin.lon + x / mPerLon;
+
+  for (let bx = -R; bx < R; bx += block + street) {
+    for (let bz = -R; bz < R; bz += block + street) {
+      if (Math.hypot(bx, bz) > R) continue;
+      const n = 2 + Math.floor(hash(bx * 31 + bz) * 2);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const w = block / n - 6, d = block / n - 6;
+          const x0 = bx + i * (block / n) + 3, z0 = bz + j * (block / n) + 3;
+          const lv = 2 + Math.floor(hash(id * 13) * 8);
+          els.push({
+            type: "way", id: id++, tags: { building: "yes", "building:levels": String(lv) },
+            geometry: [
+              { lat: toLat(z0), lon: toLon(x0) },
+              { lat: toLat(z0), lon: toLon(x0 + w) },
+              { lat: toLat(z0 + d), lon: toLon(x0 + w) },
+              { lat: toLat(z0 + d), lon: toLon(x0) },
+              { lat: toLat(z0), lon: toLon(x0) },
+            ],
+          });
+        }
+      }
+    }
+  }
+  // trame de rues
+  for (let v = -R; v < R; v += block + street) {
+    const c = v + block + street / 2;
+    els.push({ type: "way", id: id++, tags: { highway: "residential", name: "Rue " + Math.round(c) },
+      geometry: [{ lat: toLat(-R), lon: toLon(c) }, { lat: toLat(R), lon: toLon(c) }] });
+    els.push({ type: "way", id: id++, tags: { highway: "residential", name: "Avenue " + Math.round(c) },
+      geometry: [{ lat: toLat(c), lon: toLon(-R) }, { lat: toLat(c), lon: toLon(R) }] });
+  }
+  return { elements: els, _fallback: true };
+}
+
+/* ======================================================================
+   10. MENU
+   ====================================================================== */
+function setOrigin(lat, lon, label) {
+  S.origin = { lat: +lat, lon: +lon, label: label || `${(+lat).toFixed(4)}, ${(+lon).toFixed(4)}` };
+  $("coordHint").textContent = "Lieu : " + S.origin.label;
+  $("results").innerHTML = "";
+}
+
+function initMenu() {
+  // paramètres d'URL : ?lat=&lon=&r=&q=
+  const p = new URLSearchParams(location.search);
+  if (p.get("lat") && p.get("lon")) setOrigin(p.get("lat"), p.get("lon"), p.get("q") || undefined);
+  if (p.get("r")) { S.radius = clamp(parseInt(p.get("r"), 10) || 900, 200, 3000); $("radius").value = String(S.radius); }
+
+  const doSearch = async () => {
+    const q = $("q").value.trim();
+    if (!q) return;
+    $("menuErr").textContent = "";
+    $("searchBtn").disabled = true;
+    $("searchBtn").textContent = "…";
+    try {
+      const res = await geocode(q);
+      const box = $("results");
+      box.innerHTML = "";
+      if (!res.length) { $("menuErr").textContent = "Aucun lieu trouvé pour « " + q + " »."; return; }
+      res.forEach((r) => {
+        const d = document.createElement("div");
+        const main = r.name || r.display_name.split(",")[0];
+        d.innerHTML = `<b>${main}</b><small>${r.display_name}</small>`;
+        d.onclick = () => setOrigin(r.lat, r.lon, r.display_name.split(",").slice(0, 3).join(",").trim());
+        box.appendChild(d);
+      });
+    } catch (e) {
+      $("menuErr").textContent = "Recherche impossible : " + e.message + ". Tu peux quand même lancer avec « Ma position ».";
+    } finally {
+      $("searchBtn").disabled = false;
+      $("searchBtn").textContent = "Chercher";
+    }
+  };
+
+  $("searchBtn").onclick = doSearch;
+  $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } });
+
+  $("geoBtn").onclick = () => {
+    if (!navigator.geolocation) { $("menuErr").textContent = "Géolocalisation non disponible."; return; }
+    $("geoBtn").textContent = "…";
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setOrigin(pos.coords.latitude, pos.coords.longitude, "Ma position");
+        $("geoBtn").textContent = "Ma position";
+      },
+      (err) => {
+        $("menuErr").textContent = "Position refusée ou indisponible (" + err.message + ").";
+        $("geoBtn").textContent = "Ma position";
+      },
+      { enableHighAccuracy: false, timeout: 10000 }
+    );
+  };
+
+  $("playBtn").onclick = () => {
+    S.radius = parseInt($("radius").value, 10);
+    S.quality = $("quality").value;
+    start().catch((e) => {
+      $("loading").classList.add("hide");
+      $("menu").classList.remove("hide");
+      $("menuErr").textContent = "Erreur au démarrage : " + (e && e.message ? e.message : e);
+      console.error(e);
+    });
+  };
+
+  // démarrage direct si l'URL contient déjà un lieu
+  if (p.get("auto") === "1") $("playBtn").click();
+}
+
+// point d'entrée pour les tests automatisés / la console du navigateur
+window.CityWalk = { S, collides, findSpawn, updateSun, get scene() { return scene; } };
+
+initMenu();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
