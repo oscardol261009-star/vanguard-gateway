@@ -1,11 +1,12 @@
--- 🏠 House RNG Tycoon — interface joueur (design + animations)
+-- 🏠 House RNG Tycoon — HUD joueur (la révélation du tirage est en 3D, voir Reveal)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local Houses = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Houses"))
+local Reveal = require(script.Reveal)
+
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
 local RollEvent = remotes:WaitForChild("Roll")
 local ResultEvent = remotes:WaitForChild("RollResult")
@@ -15,17 +16,14 @@ local SelectEvent = remotes:WaitForChild("Select")
 local RebirthEvent = remotes:WaitForChild("Rebirth")
 
 local player = Players.LocalPlayer
-local ROLL_COOLDOWN = 0.25
-local rng = Random.new()
+local ROLL_COOLDOWN = 0.3
 
--- ─── Thème ───
 local PANEL_TOP = Color3.fromRGB(30, 36, 46)
 local PANEL_BOT = Color3.fromRGB(17, 20, 27)
 local GOLD = Color3.fromRGB(255, 206, 84)
 local TXT = Color3.fromRGB(236, 241, 247)
 local DIM = Color3.fromRGB(150, 165, 182)
 
--- ─── Helpers ───
 local function new(class, props)
 	local o = Instance.new(class)
 	for k, v in props do
@@ -58,19 +56,10 @@ local gui = new("ScreenGui", {
 	Parent = player:WaitForChild("PlayerGui"),
 })
 
--- overlay de flash (révélations rares)
-local flash = new("Frame", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-	BackgroundTransparency = 1,
-	ZIndex = 5,
-	Parent = gui,
-})
-
--- ─── Argent (haut) ───
+-- Argent (haut)
 local cashPill = panel({
-	Size = UDim2.fromScale(0.34, 0.085),
-	Position = UDim2.fromScale(0.33, 0.025),
+	Size = UDim2.fromScale(0.32, 0.08),
+	Position = UDim2.fromScale(0.34, 0.025),
 	Parent = gui,
 })
 stroke(cashPill, GOLD, 2, 0.15)
@@ -85,7 +74,7 @@ local cashLabel = new("TextLabel", {
 })
 new("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6), Parent = cashLabel })
 
--- ─── Panneau stats (gauche) ───
+-- Stats (gauche)
 local statPanel = panel({
 	Size = UDim2.fromScale(0.24, 0.2),
 	Position = UDim2.fromScale(0.02, 0.13),
@@ -96,7 +85,6 @@ sp.PaddingLeft = UDim.new(0, 14)
 sp.PaddingTop = UDim.new(0, 10)
 sp.PaddingRight = UDim.new(0, 10)
 new("UIListLayout", { Padding = UDim.new(0, 4), Parent = statPanel })
-
 new("TextLabel", {
 	Size = UDim2.fromScale(1, 0.2),
 	BackgroundTransparency = 1,
@@ -123,7 +111,6 @@ local incomeLine = statLine()
 local luckLine = statLine()
 local rebirthLine = statLine()
 
--- ─── Boutons gauche (Chance / Renaissance) ───
 local function bigButton(pos, c1, c2)
 	local b = new("TextButton", {
 		Size = UDim2.fromScale(0.24, 0.075),
@@ -132,7 +119,6 @@ local function bigButton(pos, c1, c2)
 		Font = Enum.Font.GothamBold,
 		TextScaled = true,
 		TextColor3 = Color3.fromRGB(255, 255, 255),
-		AutoButtonColor = true,
 		Text = "",
 		Parent = gui,
 	})
@@ -145,7 +131,7 @@ end
 local luckBtn = bigButton(UDim2.fromScale(0.02, 0.35), Color3.fromRGB(72, 170, 92), Color3.fromRGB(44, 120, 66))
 local rebirthBtn = bigButton(UDim2.fromScale(0.02, 0.44), Color3.fromRGB(150, 92, 210), Color3.fromRGB(96, 54, 150))
 
--- ─── Inventaire (droite) ───
+-- Inventaire (droite)
 local invPanel = panel({
 	Size = UDim2.fromScale(0.23, 0.6),
 	Position = UDim2.fromScale(0.75, 0.13),
@@ -184,7 +170,7 @@ local invScroll = new("ScrollingFrame", {
 })
 new("UIListLayout", { Padding = UDim.new(0, 6), Parent = invScroll })
 
--- ─── ROLL + AUTO (bas) ───
+-- ROLL + AUTO (bas)
 local rollBtn = new("TextButton", {
 	Size = UDim2.fromScale(0.42, 0.135),
 	Position = UDim2.fromScale(0.17, 0.83),
@@ -214,34 +200,7 @@ local autoBtn = new("TextButton", {
 corner(autoBtn, 20)
 stroke(autoBtn, Color3.fromRGB(90, 100, 115), 1.5, 0.3)
 
--- ─── Carte centrale (spin + résultat) ───
-local card = panel({
-	Size = UDim2.fromScale(0.4, 0.14),
-	Position = UDim2.fromScale(0.3, 0.31),
-	Visible = false,
-	Parent = gui,
-})
-card.ZIndex = 6
-local cardStroke = stroke(card, Color3.fromRGB(255, 255, 255), 3, 0)
-local cardText = new("TextLabel", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundTransparency = 1,
-	Font = Enum.Font.FredokaOne,
-	TextScaled = true,
-	TextColor3 = TXT,
-	Text = "",
-	ZIndex = 7,
-	Parent = card,
-})
-new("UIPadding", {
-	PaddingTop = UDim.new(0, 10),
-	PaddingBottom = UDim.new(0, 10),
-	PaddingLeft = UDim.new(0, 12),
-	PaddingRight = UDim.new(0, 12),
-	Parent = cardText,
-})
-
--- ─── Inventaire : construction des cartes ───
+-- ─── Inventaire : cartes ───
 local function rebuildInventory(inventory, selected)
 	for _, c in invScroll:GetChildren() do
 		if c:IsA("Frame") then
@@ -263,7 +222,6 @@ local function rebuildInventory(inventory, selected)
 			else
 				stroke(item, rc, 1.5, 0.4)
 			end
-			-- barre de rareté à gauche
 			local bar = new("Frame", {
 				Size = UDim2.new(0, 6, 1, -10),
 				Position = UDim2.fromOffset(6, 5),
@@ -282,7 +240,6 @@ local function rebuildInventory(inventory, selected)
 				Text = house.name,
 				Parent = item,
 			})
-			-- pastille de quantité
 			local pill = new("TextLabel", {
 				Size = UDim2.new(0.22, 0, 0.6, 0),
 				Position = UDim2.new(0.76, 0, 0.2, 0),
@@ -307,98 +264,12 @@ local function rebuildInventory(inventory, selected)
 	end
 end
 
--- ─── Animation de tirage (machine à sous) ───
-local spinning = false
-local pending = nil
-
-local function spinPick()
-	local r = rng:NextNumber() * Houses.TotalWeight
-	local acc = 0
-	for _, h in Houses.List do
-		acc += h.weight
-		if r <= acc then
-			return h
-		end
-	end
-	return Houses.List[1]
-end
-
-local function setCardPreview(h)
-	cardText.Text = h.name .. "\n" .. h.rarity
-	cardText.TextColor3 = Houses.RarityColor[h.rarity]
-	cardStroke.Color = Houses.RarityColor[h.rarity]
-end
-
-local function landing(info)
-	local color = Houses.RarityColor[info.rarity] or TXT
-	local tier = info.tier or 1
-	local rare = tier >= 4
-	cardText.TextColor3 = color
-	cardStroke.Color = color
-	cardText.Text = string.format(
-		"%s\n%s • 1 sur %s%s",
-		info.name,
-		info.rarity,
-		Houses.format(info.oneIn),
-		rare and "  ⭐" or ""
-	)
-
-	-- pop
-	card.Size = UDim2.fromScale(0.34, 0.12)
-	TweenService:Create(card, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-		Size = UDim2.fromScale(0.42, 0.15),
-	}):Play()
-	cardStroke.Thickness = 8
-	TweenService:Create(cardStroke, TweenInfo.new(0.4), { Thickness = 3 }):Play()
-
-	if rare then
-		-- flash d'écran + secousse de la carte
-		flash.BackgroundColor3 = color
-		flash.BackgroundTransparency = 0.35
-		TweenService:Create(flash, TweenInfo.new(0.5), { BackgroundTransparency = 1 }):Play()
-		local base = UDim2.fromScale(0.29, 0.305)
-		for _ = 1, 6 do
-			card.Position = base + UDim2.fromOffset(math.random(-8, 8), math.random(-8, 8))
-			task.wait(0.03)
-		end
-		card.Position = UDim2.fromScale(0.29, 0.305)
-	end
-
-	task.delay(rare and 2 or 1.1, function()
-		if not spinning then
-			card.Visible = false
-		end
-	end)
-end
-
-local function playSpin()
-	card.Visible = true
-	card.Position = UDim2.fromScale(0.29, 0.305)
-	card.Size = UDim2.fromScale(0.42, 0.15)
-	local interval = 0.045
-	local elapsed = 0
-	while elapsed < 0.85 do
-		setCardPreview(spinPick())
-		task.wait(interval)
-		elapsed += interval
-		interval *= 1.09 -- décélération
-	end
-	local t = 0
-	while not pending and t < 1 do
-		task.wait(0.05)
-		t += 0.05
-	end
-	if pending then
-		landing(pending)
-	end
-	spinning = false
-end
-
+-- ─── La révélation d'un tirage se joue dans le monde 3D ───
 ResultEvent.OnClientEvent:Connect(function(info)
-	pending = info
+	Reveal.play(info)
 end)
 
--- ─── Mises à jour d'état ───
+-- ─── État ───
 local currentReq = math.huge
 DataEvent.OnClientEvent:Connect(function(d)
 	incomeLine.Text = string.format("📈 Revenu : +%s /s", Houses.format(d.income))
@@ -414,8 +285,7 @@ local stats = player:WaitForChild("leaderstats")
 local argent = stats:WaitForChild("Argent")
 local function refreshCash()
 	cashLabel.Text = "💰 " .. Houses.format(argent.Value)
-	local ok = argent.Value >= currentReq
-	rebirthBtn.BackgroundTransparency = ok and 0 or 0.35
+	rebirthBtn.BackgroundTransparency = (argent.Value >= currentReq) and 0 or 0.35
 end
 argent.Changed:Connect(refreshCash)
 refreshCash()
@@ -423,18 +293,12 @@ refreshCash()
 -- ─── Actions ───
 local lastRoll = 0
 local function doRoll()
-	if spinning then
-		return
-	end
 	local now = os.clock()
 	if now - lastRoll < ROLL_COOLDOWN then
 		return
 	end
 	lastRoll = now
-	spinning = true
-	pending = nil
 	RollEvent:FireServer()
-	task.spawn(playSpin)
 end
 
 rollBtn.MouseButton1Click:Connect(doRoll)
@@ -465,11 +329,11 @@ autoBtn.MouseButton1Click:Connect(function()
 end)
 task.spawn(function()
 	while true do
-		if auto and not spinning then
+		if auto then
 			doRoll()
 		end
-		task.wait(0.05)
+		task.wait(ROLL_COOLDOWN)
 	end
 end)
 
-print("🏠 House RNG Tycoon — interface prête")
+print("🏠 House RNG Tycoon — HUD prêt")
