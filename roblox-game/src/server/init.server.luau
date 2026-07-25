@@ -9,6 +9,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Houses = require(ReplicatedStorage.Shared.Houses)
+local World = require(script.World)
+
+World.build()
 
 -- ─── Remotes ───
 local remotes = Instance.new("Folder")
@@ -64,11 +67,21 @@ local function buildPlot(index: number)
 	local model = Instance.new("Model")
 	model.Name = "Plot_" .. index
 
+	-- rebord en pierre (un peu plus grand, plus bas)
+	local rim = Instance.new("Part")
+	rim.Anchored = true
+	rim.Size = Vector3.new(PLOT_SIZE + 4, 2, PLOT_SIZE + 4)
+	rim.Position = origin - Vector3.new(0, 0.4, 0)
+	rim.Color = Color3.fromRGB(90, 96, 105)
+	rim.Material = Enum.Material.Slate
+	rim.TopSurface = Enum.SurfaceType.Smooth
+	rim.Parent = model
+
 	local base = Instance.new("Part")
 	base.Anchored = true
 	base.Size = Vector3.new(PLOT_SIZE, 2, PLOT_SIZE)
 	base.Position = origin
-	base.Color = Color3.fromRGB(74, 108, 74)
+	base.Color = Color3.fromRGB(96, 150, 92)
 	base.Material = Enum.Material.Grass
 	base.TopSurface = Enum.SurfaceType.Smooth
 	base.Parent = model
@@ -80,20 +93,32 @@ local function buildPlot(index: number)
 	for slot = 0, SLOTS - 1 do
 		local c = slot % GRID
 		local r = math.floor(slot / GRID)
-		local pos = top + Vector3.new((c - (GRID - 1) / 2) * SPACING, 0.1, (r - (GRID - 1) / 2) * SPACING)
+		local pos = top + Vector3.new((c - (GRID - 1) / 2) * SPACING, 0.15, (r - (GRID - 1) / 2) * SPACING)
+
+		-- halo néon sous la case
+		local glow = Instance.new("Part")
+		glow.Name = "Glow_" .. slot
+		glow.Anchored = true
+		glow.Size = Vector3.new(SPACING - 0.6, 0.2, SPACING - 0.6)
+		glow.Position = pos - Vector3.new(0, 0.15, 0)
+		glow.Color = Color3.fromRGB(120, 235, 170)
+		glow.Material = Enum.Material.Neon
+		glow.Transparency = 0.55
+		glow.CanCollide = false
+		glow.Parent = model
 
 		local pad = Instance.new("Part")
 		pad.Name = "Pad_" .. slot
 		pad.Anchored = true
 		pad.Size = Vector3.new(SPACING - 1.5, 0.4, SPACING - 1.5)
 		pad.Position = pos
-		pad.Color = Color3.fromRGB(120, 200, 140)
+		pad.Color = Color3.fromRGB(70, 110, 80)
 		pad.Material = Enum.Material.SmoothPlastic
-		pad.Transparency = 0.5
+		pad.Transparency = 0.35
 		pad.Parent = model
 
 		local cd = Instance.new("ClickDetector")
-		cd.MaxActivationDistance = 80
+		cd.MaxActivationDistance = 90
 		cd.Parent = pad
 
 		pads[slot] = pad
@@ -231,6 +256,14 @@ local function pushData(player)
 end
 
 -- ─── Poser / reprendre une maison quand on clique une case ───
+local function setSlotVisual(d, slot: number, occupied: boolean)
+	d.plot.pads[slot].Transparency = occupied and 0.9 or 0.35
+	local glow = d.plot.model:FindFirstChild("Glow_" .. slot)
+	if glow then
+		glow.Transparency = occupied and 1 or 0.55
+	end
+end
+
 local function onPadClicked(player, slot: number)
 	local d = data[player]
 	if not d then
@@ -246,7 +279,7 @@ local function onPadClicked(player, slot: number)
 			d.placedModels[slot]:Destroy()
 			d.placedModels[slot] = nil
 		end
-		d.plot.pads[slot].Transparency = 0.5
+		setSlotVisual(d, slot, false)
 		recomputeIncome(d)
 		pushData(player)
 		return
@@ -263,7 +296,7 @@ local function onPadClicked(player, slot: number)
 		d.selected = nil
 	end
 	d.grid[slot] = id
-	d.plot.pads[slot].Transparency = 0.9
+	setSlotVisual(d, slot, true)
 	buildHouseOnPad(d, slot, Houses.ById[id], Houses.TierById[id])
 	recomputeIncome(d)
 	pushData(player)
@@ -317,7 +350,7 @@ Players.PlayerAdded:Connect(function(player)
 	-- poser une cabane de départ pour amorcer le revenu
 	d.inventory.cabane = 2
 	d.grid[0] = "cabane"
-	plot.pads[0].Transparency = 0.9
+	setSlotVisual(d, 0, true)
 	buildHouseOnPad(d, 0, Houses.ById.cabane, 1)
 	recomputeIncome(d)
 
