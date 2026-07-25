@@ -10,13 +10,18 @@ jeu se met à jour dans Studio.
 
 ### 1. Installer Rojo sur ton PC
 
-Le plus simple, avec **Aftman** (gestionnaire d'outils Roblox) :
+Ce projet contient un `aftman.toml` : si tu as **Aftman** (gestionnaire
+d'outils Roblox), il installe la bonne version de Rojo tout seul.
 
-1. Va sur <https://github.com/rojo-rbx/rojo/releases>
-2. Télécharge la version **Windows** (`rojo-x.x.x-windows.zip`)
-3. Décompresse `rojo.exe` dans un dossier, par exemple `C:\rojo\`
+```bash
+cd vanguard-gateway/roblox-game
+aftman install
+```
 
-*(Ou, si tu as `winget` : `winget install Rojo.Rojo`.)*
+Répond `y` s'il demande d'ajouter Aftman au PATH, puis **rouvre ton terminal**.
+
+*(Pas d'Aftman ? `winget install Rojo.Rojo`, ou télécharge `rojo.exe` sur
+<https://github.com/rojo-rbx/rojo/releases>.)*
 
 ### 2. Installer le plugin Rojo dans Studio
 
