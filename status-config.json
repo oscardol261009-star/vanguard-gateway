@@ -1,0 +1,5 @@
+{
+  "intervalSeconds": 15,
+  "emojiMode": "perStatus",
+  "presenceRotation": ["online", "idle", "dnd", "online"]
+}
