@@ -98,6 +98,46 @@ Config.Character = {
 }
 
 --============================================================
+-- ANIMATIONS
+--============================================================
+
+Config.Animation = {
+	CrossfadeTime = 0.18, -- fondu entre deux états de locomotion
+	OneShotFadeTime = 0.08, -- saut / réception : plus sec, plus lisible
+	WalkReferenceSpeed = 16, -- vitesse pour laquelle l'anim de marche est calée
+	RunReferenceSpeed = 20, -- idem pour la course
+	MaxPlaybackSpeed = 2.2, -- au-delà, les jambes partent en hélice
+	LandImpactSpeed = 55, -- vitesse verticale minimale pour jouer la réception
+}
+
+--============================================================
+-- CAMÉRA (game feel)
+--============================================================
+
+Config.Camera = {
+	BaseFieldOfView = 70,
+	FovStartSpeed = 18, -- en dessous, aucun effet : marcher ne déforme rien
+	FovReferenceSpeed = 26, -- excédent de vitesse pour l'effet maximal
+	FovMaxIncrease = 16, -- degrés ajoutés à pleine vitesse
+	FovFrequency = 6,
+
+	WallRunRoll = 12, -- degrés d'inclinaison en wall run
+	SlideRoll = 4,
+	StrafeRoll = 3.5, -- roulis dans les virages
+	RollFrequency = 9,
+
+	DipStrength = 2.2, -- amplitude de l'encaissement à l'atterrissage
+	DipMinImpactSpeed = 45,
+	DipReferenceSpeed = 110,
+	JumpKick = 0.6, -- petite poussée vers le haut au décollage
+	DipFrequency = 13,
+
+	SlideHeightDrop = 2.4, -- abaissement de la caméra en glissade
+	CrouchHeightDrop = 1.4,
+	HeightFrequency = 8,
+}
+
+--============================================================
 -- PROJECTILES
 --============================================================
 

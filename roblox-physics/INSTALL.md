@@ -58,6 +58,20 @@ Appuie sur **Play**. Tu contrôles ton personnage avec le contrôleur avancé :
 En mode Studio, la console affiche l'état de locomotion en direct
 (`Idle`, `Running`, `Airborne`, `Sliding`, `WallRunning`...).
 
+### Mettre à jour une installation existante
+
+Le `.rbxmx` ne se met pas à jour tout seul dans ton jeu. Pour passer à une
+nouvelle version :
+
+1. Supprime les trois anciens éléments :
+   `ReplicatedStorage/AdvancedPhysics`, `ServerScriptService/PhysicsServer`,
+   `StarterPlayerScripts/PhysicsClient`
+2. Retélécharge `AdvancedPhysics.rbxmx` et réimporte-le
+3. Redéplace les trois éléments comme à l'étape 3
+
+> Si tu as modifié `PhysicsClient` (par exemple pour y coller tes IDs
+> d'animation), sauvegarde ton fichier avant de le supprimer.
+
 ### Après une modification des sources
 
 Le `.rbxmx` est **généré**, il ne se met pas à jour tout seul. Si tu modifies

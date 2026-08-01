@@ -7,6 +7,8 @@ personnage, ou que la balistique, sans traîner le reste.
 | Module | Ce qu'il fait |
 |---|---|
 | `CharacterController` | Contrôleur capsule flottante : marches, pentes, coyote time, double saut, wall run, glissade, plateformes mobiles |
+| `AnimationController` | Animations pilotées par l'état du contrôleur, avec fondus et vitesse de lecture asservie |
+| `CameraEffects` | FOV dynamique, inclinaison en wall run, encaissement à l'atterrissage |
 | `ProjectileSystem` | Balistique par raycast : traînée quadratique, effet Magnus, pénétration des matériaux, ricochets |
 | `VehicleController` | Véhicule à suspension raycast : ressorts, ellipse de friction, barres anti-roulis, appui aéro |
 | `GravityField` | Gravité arbitraire : planètes sphériques, zones, marcher au plafond |
@@ -134,6 +136,71 @@ Le saut vise une **hauteur** (`JumpHeight`), pas une vitesse : `v = √(2gh)`.
 Changer la gravité ne casse donc pas le réglage. Et la composante verticale est
 *remplacée*, pas ajoutée : un saut lancé pendant une chute monte aussi haut
 qu'un saut à l'arrêt.
+
+---
+
+## Animations
+
+Le script `Animate` que Roblox insère dans chaque personnage lit
+`Humanoid.MoveDirection` et les états du Humanoid. Comme le contrôleur met le
+Humanoid en état `Physics`, `Animate` croit le personnage immobile : **plus
+aucune animation ne se joue**. `AnimationController` le désactive et rejoue les
+pistes lui-même.
+
+```lua
+local animator = AdvancedPhysics.AnimationController.new(character, controller)
+AdvancedPhysics.register(animator)
+```
+
+Les IDs d'animation sont **récupérés dans le script `Animate` du personnage**
+plutôt que codés en dur : ça marche pour R6 comme pour R15, et ça respecte le
+pack d'animations que le joueur a équipé sur son avatar.
+
+La vitesse de lecture suit la vitesse réelle du personnage — sans ça il
+« patine », ses pieds glissent sur le sol.
+
+### Ajouter des animations de parkour
+
+Roblox ne fournit **pas** d'animation de glissade, de wall run ni de réception.
+Crée-les dans l'éditeur d'animation (ou prends-en dans la Boîte à outils),
+publie-les, puis passe leurs IDs :
+
+```lua
+AdvancedPhysics.AnimationController.new(character, controller, {
+    slide   = "rbxassetid://TON_ID",
+    wallRun = "rbxassetid://TON_ID",
+    land    = "rbxassetid://TON_ID",
+    crouch  = "rbxassetid://TON_ID",
+})
+```
+
+Sans ID fourni, chaque état retombe sur une animation existante (la glissade
+utilise la chute, le wall run utilise la course) : rien ne casse, c'est juste
+moins spectaculaire.
+
+---
+
+## Caméra : le « game feel »
+
+`CameraEffects` ne change aucune mécanique, il rend la vitesse **lisible** —
+c'est précisément ce qui sépare un contrôleur correct d'un jeu de parkour qui
+donne envie d'y rejouer.
+
+```lua
+local effects = AdvancedPhysics.CameraEffects.new(controller, workspace.CurrentCamera)
+```
+
+| Effet | Ce qu'il apporte |
+|---|---|
+| FOV dynamique | Le champ s'ouvre avec la vitesse. Le cerveau lit l'élargissement comme de l'accélération. Inactif à la marche. |
+| Inclinaison | La caméra penche vers le mur en wall run — le mur devient lisible — et roule légèrement dans les virages. |
+| Encaissement | Plongée à l'atterrissage, proportionnelle à l'impact, saturée pour qu'une chute de 500 studs ne passe pas sous la map. |
+| Abaissement | La caméra descend en glissade et en accroupi. |
+
+Tout passe par des ressorts amortis, donc reste fluide quel que soit le
+framerate. Le module s'accroche **après** la caméra par défaut
+(`RenderPriority.Camera + 1`) et n'applique qu'un décalage relatif : la caméra
+Roblox continue de fonctionner normalement.
 
 ---
 

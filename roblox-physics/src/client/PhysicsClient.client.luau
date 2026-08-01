@@ -24,8 +24,21 @@ local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
 local controller = nil
+local animator = nil
+local cameraEffects = nil
 local handle = nil
+local animatorHandle = nil
 local gamepadMove = Vector3.zero
+
+-- Animations de parkour personnalisées. Elles n'existent pas dans Roblox :
+-- crée-les dans l'éditeur d'animation (ou prends-en dans la Boîte à outils),
+-- publie-les, puis colle les IDs ici. Laisse vide pour utiliser un repli.
+local CUSTOM_ANIMATIONS = {
+	-- slide = "rbxassetid://0",
+	-- wallRun = "rbxassetid://0",
+	-- land = "rbxassetid://0",
+	-- crouch = "rbxassetid://0",
+}
 
 --============================================================
 -- ENTRÉES
@@ -149,6 +162,18 @@ end)
 --============================================================
 
 local function teardown()
+	if cameraEffects then
+		cameraEffects:destroy()
+		cameraEffects = nil
+	end
+	if animatorHandle then
+		animatorHandle.disconnect()
+		animatorHandle = nil
+	end
+	if animator then
+		animator:destroy()
+		animator = nil
+	end
 	if handle then
 		handle.disconnect()
 		handle = nil
@@ -170,7 +195,15 @@ local function setup(character: Model)
 	handle = AdvancedPhysics.register(controller)
 	bindActions()
 
-	-- Exemple : piloter les animations depuis l'état de locomotion
+	-- Les animations doivent être créées APRÈS le contrôleur : le module
+	-- désactive le script Animate par défaut, que le contrôleur a rendu inerte
+	-- en passant le Humanoid en état Physics.
+	animator = AdvancedPhysics.AnimationController.new(character, controller, CUSTOM_ANIMATIONS)
+	animatorHandle = AdvancedPhysics.register(animator)
+
+	-- FOV dynamique, inclinaison en wall run, encaissement à l'atterrissage
+	cameraEffects = AdvancedPhysics.CameraEffects.new(controller, camera)
+
 	controller:on("StateChanged", function(newState: string)
 		if RunService:IsStudio() then
 			print(`[Physics] état : {newState}`)
