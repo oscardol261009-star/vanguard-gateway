@@ -9,6 +9,7 @@ personnage, ou que la balistique, sans traîner le reste.
 | `CharacterController` | Contrôleur capsule flottante : marches, pentes, coyote time, double saut, wall run, glissade, plateformes mobiles |
 | `AnimationController` | Animations pilotées par l'état du contrôleur, avec fondus et vitesse de lecture asservie |
 | `CameraEffects` | FOV dynamique, inclinaison en wall run, encaissement à l'atterrissage |
+| `FirstPersonView` | Vue subjective avec corps réel visible, tête masquée, nuque asservie à la caméra |
 | `ProjectileSystem` | Balistique par raycast : traînée quadratique, effet Magnus, pénétration des matériaux, ricochets |
 | `VehicleController` | Véhicule à suspension raycast : ressorts, ellipse de friction, barres anti-roulis, appui aéro |
 | `GravityField` | Gravité arbitraire : planètes sphériques, zones, marcher au plafond |
@@ -158,6 +159,8 @@ pack d'animations que le joueur a équipé sur son avatar.
 
 La vitesse de lecture suit la vitesse réelle du personnage — sans ça il
 « patine », ses pieds glissent sur le sol.
+
+**→ Guide complet pour créer tes propres animations : [ANIMATIONS.md](ANIMATIONS.md)**
 
 ### Ajouter des animations de parkour
 

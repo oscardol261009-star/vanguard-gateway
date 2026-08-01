@@ -26,9 +26,13 @@ local camera = workspace.CurrentCamera
 local controller = nil
 local animator = nil
 local cameraEffects = nil
+local firstPerson = nil
 local handle = nil
 local animatorHandle = nil
 local gamepadMove = Vector3.zero
+
+-- Passe à false pour rester en vue à la troisième personne.
+local FIRST_PERSON = true
 
 -- Animations de parkour personnalisées. Elles n'existent pas dans Roblox :
 -- crée-les dans l'éditeur d'animation (ou prends-en dans la Boîte à outils),
@@ -162,6 +166,10 @@ end)
 --============================================================
 
 local function teardown()
+	if firstPerson then
+		firstPerson:destroy()
+		firstPerson = nil
+	end
 	if cameraEffects then
 		cameraEffects:destroy()
 		cameraEffects = nil
@@ -203,6 +211,12 @@ local function setup(character: Model)
 
 	-- FOV dynamique, inclinaison en wall run, encaissement à l'atterrissage
 	cameraEffects = AdvancedPhysics.CameraEffects.new(controller, camera)
+
+	-- Vue subjective avec le corps réel visible : les animations de parkour
+	-- sont réutilisées telles quelles, on voit ses jambes en baissant les yeux.
+	if FIRST_PERSON then
+		firstPerson = AdvancedPhysics.FirstPersonView.new(player, character, controller)
+	end
 
 	controller:on("StateChanged", function(newState: string)
 		if RunService:IsStudio() then

@@ -138,6 +138,19 @@ Config.Camera = {
 }
 
 --============================================================
+-- VUE PREMIÈRE PERSONNE
+--============================================================
+
+Config.FirstPerson = {
+	LockFirstPerson = true, -- verrouille la caméra en vue subjective
+	ShowBody = true, -- garde le corps visible (on voit ses jambes)
+	HideAccessories = true, -- chapeaux/cheveux masqués : ils flottent devant l'objectif
+	TiltHead = true, -- la nuque suit le tangage de la caméra
+	MaxHeadPitch = 70, -- degrés
+	HeadPitchScale = 0.8, -- < 1 : la tête suit partiellement, plus naturel
+}
+
+--============================================================
 -- PROJECTILES
 --============================================================
 

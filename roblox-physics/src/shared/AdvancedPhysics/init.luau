@@ -10,6 +10,7 @@
 		.CharacterController  contrôleur capsule flottante (marche, saut, wall run, glissade)
 		.AnimationController  animations pilotées par l'état du contrôleur
 		.CameraEffects        FOV dynamique, inclinaison, encaissement (game feel)
+		.FirstPersonView      vue subjective avec corps visible
 		.ProjectileSystem     balistique raycast (traînée, Magnus, pénétration, ricochet)
 		.VehicleController    véhicule à suspension raycast
 		.GravityField         gravité arbitraire (planètes, zones, plafonds)
@@ -64,6 +65,7 @@ AdvancedPhysics.GravityField = require(script.Modules.GravityField)
 AdvancedPhysics.CharacterController = require(script.Modules.CharacterController)
 AdvancedPhysics.AnimationController = require(script.Modules.AnimationController)
 AdvancedPhysics.CameraEffects = require(script.Modules.CameraEffects)
+AdvancedPhysics.FirstPersonView = require(script.Modules.FirstPersonView)
 AdvancedPhysics.ProjectileSystem = require(script.Modules.ProjectileSystem)
 AdvancedPhysics.VehicleController = require(script.Modules.VehicleController)
 AdvancedPhysics.VerletRope = require(script.Modules.VerletRope)

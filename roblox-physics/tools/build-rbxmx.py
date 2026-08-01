@@ -72,6 +72,12 @@ TREE = (
                         ),
                         ("CameraEffects", "ModuleScript", os.path.join(SHARED, "Modules", "CameraEffects.luau"), []),
                         (
+                            "FirstPersonView",
+                            "ModuleScript",
+                            os.path.join(SHARED, "Modules", "FirstPersonView.luau"),
+                            [],
+                        ),
+                        (
                             "ProjectileSystem",
                             "ModuleScript",
                             os.path.join(SHARED, "Modules", "ProjectileSystem.luau"),
