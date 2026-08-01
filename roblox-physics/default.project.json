@@ -1,0 +1,33 @@
+{
+  "name": "AdvancedPhysics",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "AdvancedPhysics": {
+        "$path": "src/shared/AdvancedPhysics"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "PhysicsServer": {
+        "$path": "src/server/PhysicsServer.server.luau"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "PhysicsClient": {
+          "$path": "src/client/PhysicsClient.client.luau"
+        }
+      }
+    },
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "Gravity": 196.2
+      }
+    }
+  }
+}
