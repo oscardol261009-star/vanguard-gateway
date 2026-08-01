@@ -1,0 +1,4812 @@
+<?xml version="1.0" encoding="utf-8"?>
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4"><External>null</External><External>nil</External><Item class="Folder" referent="RBX1"><Properties><string name="Name">AdvancedPhysics_Install</string></Properties><Item class="ModuleScript" referent="RBX2"><Properties><string name="Name">AdvancedPhysics</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	AdvancedPhysics
+	Framework de physique avancée pour Roblox (Luau).
+
+	Point d'entrée unique :
+		local AdvancedPhysics = require(ReplicatedStorage.AdvancedPhysics)
+
+	Sous-modules exposés :
+		.CharacterController  contrôleur capsule flottante (marche, saut, wall run, glissade)
+		.ProjectileSystem     balistique raycast (traînée, Magnus, pénétration, ricochet)
+		.VehicleController    véhicule à suspension raycast
+		.GravityField         gravité arbitraire (planètes, zones, plafonds)
+		.VerletRope           cordes / grappins Verlet
+		.ForceEffects         explosions, cônes de souffle, attracteurs
+		.Buoyancy             flottabilité (Archimède)
+		.Aerodynamics         traînée, portance, Magnus
+		.Integrator           RK4, Verlet, balistique analytique
+		.Spring / .VectorUtil / .RaycastUtil / .Config / .Types
+
+	ORDONNANCEUR
+	Tout objet exposant `:step(dt)` peut être enregistré :
+
+		local handle = AdvancedPhysics.register(controller)
+		handle:disconnect()   -- ou AdvancedPhysics.unregister(controller)
+
+	Pourquoi PreSimulation et pas Heartbeat ?
+	PreSimulation s'exécute *avant* le pas physique du moteur. Les forces
+	posées ici sont donc prises en compte par la simulation du même frame.
+	Avec Heartbeat, on écrirait des forces qui ne s'appliqueraient qu'à
+	l'image suivante : un frame de latence sur tout le contrôleur.
+
+	Pourquoi pas de pas de temps fixe global ?
+	Les modules qui en ont besoin (projectiles, cordes) font leur propre
+	sous-échantillonnage en interne. Imposer un accumulateur global ferait
+	varier le nombre d'appels par image (0, 1 ou 2), ce qui saccade les
+	forces continues comme la suspension.
+]]
+
+local RunService = game:GetService("RunService")
+
+local Config = require(script.Config)
+
+local AdvancedPhysics = {}
+
+AdvancedPhysics.Version = "1.0.0"
+
+-- Utilitaires
+AdvancedPhysics.Config = Config
+AdvancedPhysics.Types = require(script.Types)
+AdvancedPhysics.VectorUtil = require(script.Util.VectorUtil)
+AdvancedPhysics.RaycastUtil = require(script.Util.RaycastUtil)
+AdvancedPhysics.Spring = require(script.Util.Spring)
+
+-- Solveurs
+AdvancedPhysics.Integrator = require(script.Solvers.Integrator)
+AdvancedPhysics.Aerodynamics = require(script.Solvers.Aerodynamics)
+AdvancedPhysics.Buoyancy = require(script.Solvers.Buoyancy)
+
+-- Modules
+AdvancedPhysics.GravityField = require(script.Modules.GravityField)
+AdvancedPhysics.CharacterController = require(script.Modules.CharacterController)
+AdvancedPhysics.ProjectileSystem = require(script.Modules.ProjectileSystem)
+AdvancedPhysics.VehicleController = require(script.Modules.VehicleController)
+AdvancedPhysics.VerletRope = require(script.Modules.VerletRope)
+AdvancedPhysics.ForceEffects = require(script.Modules.ForceEffects)
+
+--============================================================
+-- ORDONNANCEUR
+--============================================================
+
+local registered: { any } = {}
+local connection: RBXScriptConnection? = nil
+local stepping = false
+local pendingRemovals: { any } = {}
+
+local function stepAll(dt: number)
+	local clamped = math.min(dt, Config.General.MaxDeltaTime)
+
+	stepping = true
+	for index = 1, #registered do
+		local object = registered[index]
+		if object then
+			local ok, err = pcall(object.step, object, clamped)
+			if not ok then
+				warn(`[AdvancedPhysics] step() a échoué : {err}`)
+			end
+		end
+	end
+	stepping = false
+
+	-- désenregistrements demandés pendant la boucle
+	if #pendingRemovals > 0 then
+		for _, object in pendingRemovals do
+			AdvancedPhysics.unregister(object)
+		end
+		table.clear(pendingRemovals)
+	end
+
+	AdvancedPhysics.ProjectileSystem.step(clamped)
+end
+
+local function ensureConnection()
+	if connection then
+		return
+	end
+	connection = RunService.PreSimulation:Connect(stepAll)
+end
+
+--[[
+	Enregistre un objet possédant `:step(dt)`.
+	Renvoie un handle avec `:disconnect()`.
+]]
+function AdvancedPhysics.register(object)
+	assert(type(object) == "table" and type(object.step) == "function", "[AdvancedPhysics] l'objet doit exposer :step(dt)")
+
+	if table.find(registered, object) then
+		return { disconnect = function() end }
+	end
+
+	table.insert(registered, object)
+	ensureConnection()
+
+	return {
+		object = object,
+		disconnect = function()
+			AdvancedPhysics.unregister(object)
+		end,
+	}
+end
+
+function AdvancedPhysics.unregister(object)
+	if stepping then
+		table.insert(pendingRemovals, object)
+		return
+	end
+	local index = table.find(registered, object)
+	if index then
+		table.remove(registered, index)
+	end
+end
+
+--[[ Désenregistre puis détruit l'objet s'il expose `:destroy()`. ]]
+function AdvancedPhysics.destroy(object)
+	AdvancedPhysics.unregister(object)
+	if type(object.destroy) == "function" then
+		object:destroy()
+	end
+end
+
+function AdvancedPhysics.registeredCount(): number
+	return #registered
+end
+
+--[[ Arrête complètement l'ordonnanceur (changement de manche, tests). ]]
+function AdvancedPhysics.shutdown()
+	if connection then
+		connection:Disconnect()
+		connection = nil
+	end
+	for _, object in registered do
+		if type(object.destroy) == "function" then
+			pcall(object.destroy, object)
+		end
+	end
+	table.clear(registered)
+	table.clear(pendingRemovals)
+	AdvancedPhysics.ProjectileSystem.clear()
+end
+
+return AdvancedPhysics
+]]></ProtectedString></Properties><Item class="ModuleScript" referent="RBX3"><Properties><string name="Name">Config</string><ProtectedString name="Source"><![CDATA[--!strict
+--[[
+	Config.luau
+	Toutes les constantes réglables du framework, au même endroit.
+
+	Unités : Roblox travaille en studs. 1 stud ~= 0.28 m.
+	Les formules aéro/hydro utilisent des SI (kg, m, m/s) puis convertissent,
+	d'où les facteurs STUDS_PER_METER.
+]]
+
+local Config = {}
+
+--============================================================
+-- GÉNÉRAL
+--============================================================
+
+Config.General = {
+	-- dt maximum accepté par l'ordonnanceur : évite qu'un freeze de 2 s
+	-- ne téléporte tout le monde à travers la map.
+	MaxDeltaTime = 1 / 15,
+	-- pas de simulation interne pour les projectiles / cordes
+	FixedSubStep = 1 / 120,
+	MaxSubSteps = 8,
+}
+
+--============================================================
+-- ENVIRONNEMENT
+--============================================================
+
+Config.Environment = {
+	StudsPerMeter = 3.5714286, -- 1 stud = 0.28 m
+	AirDensity = 1.225, -- kg/m³ au niveau de la mer
+	WaterDensity = 1000, -- kg/m³
+	DefaultGravity = 196.2, -- studs/s² (valeur Roblox par défaut)
+	Wind = Vector3.zero, -- vent global, studs/s
+}
+
+--============================================================
+-- PERSONNAGE
+-- Contrôleur "capsule flottante" : le personnage lévite au-dessus du sol
+-- grâce à un ressort, ce qui donne gratuitement les marches, les pentes
+-- et un contact parfaitement stable.
+--============================================================
+
+Config.Character = {
+	-- Suspension
+	RideHeight = 3.0, -- distance souhaitée entre le centre du root et le sol
+	RideSpringStrength = 220, -- raideur (par unité de masse)
+	RideSpringDamper = 26, -- amortissement (par unité de masse)
+	ProbeExtra = 1.5, -- longueur de raycast au-delà de RideHeight
+	ProbeRadius = 1.2, -- rayon du spherecast de détection du sol
+	MaxStepHeight = 2.5, -- hauteur de marche franchissable
+	MaxSlopeAngle = 55, -- au-delà : on glisse
+	SlideAcceleration = 90, -- accélération subie sur une pente trop raide
+
+	-- Déplacement
+	WalkSpeed = 16,
+	RunSpeed = 26,
+	CrouchSpeed = 8,
+	GroundAcceleration = 160, -- studs/s²
+	GroundDeceleration = 220,
+	AirAcceleration = 45,
+	AirDrag = 0.35, -- traînée horizontale en l'air (1/s)
+	MaxGroundForce = 12000, -- garde-fou anti-explosion
+	TurnResponsiveness = 28, -- vitesse d'alignement de l'orientation
+
+	-- Saut
+	JumpHeight = 9.5, -- hauteur cible, convertie en vitesse via la gravité
+	MaxJumps = 2, -- 1 = simple, 2 = double saut
+	CoyoteTime = 0.12, -- on peut encore sauter après avoir quitté le sol
+	JumpBuffer = 0.15, -- un saut demandé un peu trop tôt est mémorisé
+	JumpSuppressTime = 0.18, -- suspension désactivée après un saut
+	VariableJumpCut = 0.45, -- vitesse conservée si on relâche le saut
+	FallGravityScale = 1.35, -- chute plus lourde = meilleur game feel
+	LowJumpGravityScale = 1.8, -- saut relâché tôt = retombée rapide
+
+	-- Murs
+	WallCheckDistance = 2.2,
+	WallRunEnabled = true,
+	WallRunMinSpeed = 14,
+	WallRunGravityScale = 0.25,
+	WallRunMaxTime = 2.0,
+	WallRunStickForce = 30,
+	WallJumpVerticalSpeed = 42,
+	WallJumpHorizontalSpeed = 40,
+
+	-- Glissade
+	SlideEnabled = true,
+	SlideMinSpeed = 20,
+	SlideFriction = 0.6, -- 1/s
+	SlideSlopeBoost = 55,
+	SlideMaxTime = 1.6,
+
+	-- Divers
+	InheritPlatformVelocity = true,
+	PushOtherParts = true, -- réaction sur le sol (Newton 3)
+	MaxPushForce = 4000,
+}
+
+--============================================================
+-- PROJECTILES
+--============================================================
+
+Config.Projectile = {
+	Mass = 0.0095, -- ~9.5 g (calibre 9 mm)
+	DragCoefficient = 0.3,
+	CrossSection = 6.4e-5, -- m²
+	GravityScale = 1,
+	MagnusCoefficient = 0.00035,
+	Lifetime = 6,
+	MaxDistance = 4000,
+	MinSpeed = 20,
+	Penetrations = 0,
+	PenetrationPower = 0,
+	Ricochets = 0,
+	RicochetMaxAngle = 25, -- rebond seulement en incidence rasante
+	Restitution = 0.5,
+	TangentFriction = 0.25,
+}
+
+--============================================================
+-- VÉHICULE
+--============================================================
+
+Config.Vehicle = {
+	SuspensionRestLength = 2.2,
+	SuspensionStiffness = 55000, -- N/stud (par roue, avant répartition)
+	SuspensionDamping = 4200,
+	SuspensionMaxCompression = 0.92,
+	MaxSteerAngle = 32, -- degrés
+	SteerSpeed = 4.5, -- rad/s de rotation du volant
+	SteerSpeedFalloff = 0.55, -- réduction du braquage à haute vitesse
+	EnginePower = 34000,
+	MaxSpeed = 220, -- studs/s
+	BrakeForce = 42000,
+	HandbrakeForce = 26000,
+	TireGripForward = 2.2,
+	TireGripLateral = 3.4,
+	TireLoadSensitivity = 0.85, -- < 1 : le grip augmente moins vite que la charge
+	AntiRollStiffness = 9000,
+	DownforceCoefficient = 0.55,
+	AeroDragCoefficient = 0.9,
+	RolloverAssist = 0.15,
+}
+
+--============================================================
+-- CORDES / VERLET
+--============================================================
+
+Config.Rope = {
+	Segments = 24,
+	ConstraintIterations = 8,
+	Damping = 0.995, -- amortissement Verlet (1 = aucun)
+	Stiffness = 1.0, -- 0..1
+	CollisionRadius = 0.15,
+	CollisionFriction = 0.55,
+	CollisionBounce = 0.1,
+	MaxStretch = 1.04, -- limite d'élongation avant tension
+	TensionForce = 900, -- force de rappel appliquée aux extrémités attachées
+}
+
+--============================================================
+-- EXPLOSIONS / FORCES
+--============================================================
+
+Config.Force = {
+	ExplosionRadius = 40,
+	ExplosionImpulse = 180, -- par unité de masse à distance nulle
+	ExplosionFalloff = "InverseSquare",
+	ExplosionUpBias = 0.35,
+	ExplosionLineOfSight = true,
+	AttractorFalloff = "InverseSquare",
+}
+
+--[[
+	Fusionne des surcharges dans une copie d'une table de config.
+	N'écrase que les clés déjà connues : une faute de frappe lève une erreur
+	plutôt que de rester silencieuse.
+]]
+function Config.merge<T>(base: T, overrides: { [string]: any }?): T
+	local result = table.clone(base :: any)
+	if overrides then
+		for key, value in overrides do
+			if result[key] == nil then
+				error(`[AdvancedPhysics] clé de configuration inconnue : "{key}"`, 3)
+			end
+			result[key] = value
+		end
+	end
+	return (result :: any) :: T
+end
+
+return Config
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX4"><Properties><string name="Name">Types</string><ProtectedString name="Source"><![CDATA[--!strict
+--[[
+	Types.luau
+	Définitions de types partagées par tous les modules du framework.
+
+	Tout est exporté pour pouvoir écrire :
+		local Types = require(AdvancedPhysics.Types)
+		local info: Types.GroundInfo = ...
+]]
+
+local Types = {}
+
+--============================================================
+-- SOL / COLLISIONS
+--============================================================
+
+export type GroundInfo = {
+	grounded: boolean, -- true si le sol est exploitable (pente <= limite)
+	touching: boolean, -- true si quelque chose est sous les pieds (même trop pentu)
+	normal: Vector3, -- normale du sol (monde)
+	position: Vector3, -- point de contact
+	distance: number, -- distance entre l'origine du raycast et le sol
+	slopeAngle: number, -- angle en degrés entre la normale et le "up" courant
+	instance: BasePart?, -- pièce touchée
+	platformVelocity: Vector3, -- vélocité du sol au point de contact (plateformes mobiles)
+}
+
+export type WallInfo = {
+	touching: boolean,
+	normal: Vector3,
+	position: Vector3,
+	distance: number,
+	instance: BasePart?,
+}
+
+--============================================================
+-- RESSORTS
+--============================================================
+
+export type VectorSpring = {
+	position: Vector3,
+	velocity: Vector3,
+	target: Vector3,
+	frequency: number,
+	damping: number,
+	update: (self: VectorSpring, dt: number) -> Vector3,
+	impulse: (self: VectorSpring, velocity: Vector3) -> (),
+	reset: (self: VectorSpring, value: Vector3) -> (),
+}
+
+export type NumberSpring = {
+	position: number,
+	velocity: number,
+	target: number,
+	frequency: number,
+	damping: number,
+	update: (self: NumberSpring, dt: number) -> number,
+	impulse: (self: NumberSpring, velocity: number) -> (),
+	reset: (self: NumberSpring, value: number) -> (),
+}
+
+--============================================================
+-- CHAMPS DE GRAVITÉ
+--============================================================
+
+export type GravityFieldKind = "Directional" | "Point" | "Sphere" | "Box" | "Custom"
+
+export type GravityFieldDef = {
+	id: string?,
+	kind: GravityFieldKind,
+	priority: number?, -- le plus grand gagne quand plusieurs champs se recouvrent
+	strength: number?, -- accélération en studs/s²
+	direction: Vector3?, -- pour "Directional"
+	origin: Vector3?, -- pour "Point" / "Sphere"
+	radius: number?, -- portée (Point / Sphere)
+	falloff: ("None" | "Linear" | "InverseSquare")?,
+	part: BasePart?, -- pour "Box" : la zone suit cette pièce
+	compute: ((position: Vector3) -> Vector3?)?, -- pour "Custom"
+	blend: number?, -- 0..1, mélange avec la gravité par défaut
+}
+
+--============================================================
+-- PROJECTILES
+--============================================================
+
+export type ProjectileHit = {
+	instance: BasePart,
+	position: Vector3,
+	normal: Vector3,
+	material: Enum.Material,
+	distance: number,
+	velocity: Vector3, -- vélocité du projectile au moment de l'impact
+	speed: number,
+	penetrationsLeft: number,
+	ricochetsLeft: number,
+}
+
+export type ProjectileDef = {
+	position: Vector3,
+	velocity: Vector3,
+
+	mass: number?, -- kg (défaut 0.01)
+	dragCoefficient: number?, -- Cd (défaut 0.3, sphère lisse ~0.47)
+	crossSection: number?, -- m² (défaut 5e-5)
+	gravityScale: number?, -- multiplicateur de gravité (défaut 1)
+	spin: Vector3?, -- rad/s, produit l'effet Magnus
+	magnusCoefficient: number?,
+
+	lifetime: number?, -- secondes (défaut 5)
+	maxDistance: number?, -- studs
+	minSpeed: number?, -- en dessous, le projectile meurt
+
+	penetrations: number?, -- nb de surfaces traversables
+	penetrationPower: number?, -- studs d'épaisseur perçables au total
+	ricochets: number?, -- nb de rebonds
+	ricochetMaxAngle: number?, -- degrés : au-delà, pas de rebond
+	restitution: number?, -- élasticité du rebond 0..1
+	tangentFriction: number?, -- perte tangentielle au rebond 0..1
+
+	raycastParams: RaycastParams?,
+	radius: number?, -- > 0 => spherecast au lieu de raycast
+
+	onUpdate: ((position: Vector3, velocity: Vector3, dt: number) -> ())?,
+	onHit: ((hit: ProjectileHit) -> ("Stop" | "Penetrate" | "Ricochet" | "Ignore")?)?,
+	onTerminate: ((position: Vector3, reason: string) -> ())?,
+
+	userData: any?,
+}
+
+--============================================================
+-- VÉHICULES
+--============================================================
+
+export type WheelDef = {
+	offset: Vector3, -- position de l'ancrage dans l'espace du châssis
+	radius: number,
+	steer: boolean?, -- roue directrice
+	drive: boolean?, -- roue motrice
+	brakeBias: number?, -- 0..1, répartition du freinage
+	handbrake: boolean?, -- affectée par le frein à main
+	model: BasePart?, -- visuel optionnel, positionné automatiquement
+}
+
+export type WheelState = {
+	def: WheelDef,
+	grounded: boolean,
+	compression: number, -- 0..1
+	suspensionLength: number,
+	contactPoint: Vector3,
+	contactNormal: Vector3,
+	normalForce: number,
+	steerAngle: number, -- radians
+	spinAngle: number, -- radians, pour l'affichage
+	slipRatio: number,
+	slipAngle: number,
+	instance: BasePart?,
+}
+
+--============================================================
+-- CONTRÔLEUR DE PERSONNAGE
+--============================================================
+
+export type LocomotionState =
+	"Idle"
+	| "Walking"
+	| "Running"
+	| "Crouching"
+	| "Sliding"
+	| "Airborne"
+	| "WallRunning"
+	| "Swimming"
+
+export type CharacterSnapshot = {
+	state: LocomotionState,
+	grounded: boolean,
+	velocity: Vector3,
+	horizontalSpeed: number,
+	upVector: Vector3,
+	groundNormal: Vector3,
+	slopeAngle: number,
+	coyoteTimeLeft: number,
+	jumpsLeft: number,
+}
+
+--============================================================
+-- ORDONNANCEUR
+--============================================================
+
+export type Steppable = {
+	step: (self: any, dt: number) -> (),
+	destroy: ((self: any) -> ())?,
+}
+
+return Types
+]]></ProtectedString></Properties></Item><Item class="Folder" referent="RBX5"><Properties><string name="Name">Util</string></Properties><Item class="ModuleScript" referent="RBX6"><Properties><string name="Name">VectorUtil</string><ProtectedString name="Source"><![CDATA[--!strict
+--[[
+	VectorUtil.luau
+	Boîte à outils vectorielle. Toutes les fonctions sont pures et sûres
+	face aux vecteurs nuls (pas de division par zéro, pas de NaN).
+]]
+
+local VectorUtil = {}
+
+local EPSILON = 1e-6
+
+--[[ Direction unitaire, ou Vector3.zero si le vecteur est trop court. ]]
+function VectorUtil.safeUnit(v: Vector3): Vector3
+	local magnitude = v.Magnitude
+	if magnitude < EPSILON then
+		return Vector3.zero
+	end
+	return v / magnitude
+end
+
+--[[ Limite la norme sans changer la direction. ]]
+function VectorUtil.clampMagnitude(v: Vector3, maxMagnitude: number): Vector3
+	local magnitude = v.Magnitude
+	if magnitude > maxMagnitude and magnitude > EPSILON then
+		return v * (maxMagnitude / magnitude)
+	end
+	return v
+end
+
+--[[ Composante de `v` parallèle à `axis`. ]]
+function VectorUtil.projectOnVector(v: Vector3, axis: Vector3): Vector3
+	local unit = VectorUtil.safeUnit(axis)
+	return unit * v:Dot(unit)
+end
+
+--[[ Composante de `v` perpendiculaire à `normal` (projection sur le plan). ]]
+function VectorUtil.projectOnPlane(v: Vector3, normal: Vector3): Vector3
+	local unit = VectorUtil.safeUnit(normal)
+	return v - unit * v:Dot(unit)
+end
+
+--[[
+	Réflexion d'un vecteur sur une surface.
+	restitution = 1 : rebond parfait ; 0 : le vecteur reste dans le plan.
+]]
+function VectorUtil.reflect(v: Vector3, normal: Vector3, restitution: number?): Vector3
+	local unit = VectorUtil.safeUnit(normal)
+	local e = restitution or 1
+	return v - unit * (v:Dot(unit) * (1 + e))
+end
+
+--[[
+	Rebond réaliste : la composante normale rebondit avec `restitution`,
+	la composante tangentielle est freinée par `friction`.
+]]
+function VectorUtil.bounce(v: Vector3, normal: Vector3, restitution: number, friction: number): Vector3
+	local unit = VectorUtil.safeUnit(normal)
+	local normalPart = unit * v:Dot(unit)
+	local tangentPart = v - normalPart
+	return tangentPart * (1 - math.clamp(friction, 0, 1)) - normalPart * restitution
+end
+
+--[[ Fait glisser un mouvement le long d'une surface (déplacement bloqué). ]]
+function VectorUtil.slide(v: Vector3, normal: Vector3): Vector3
+	local unit = VectorUtil.safeUnit(normal)
+	local into = v:Dot(unit)
+	if into >= 0 then
+		return v
+	end
+	return v - unit * into
+end
+
+--[[ Déplace `current` vers `target` d'au plus `maxDelta`. ]]
+function VectorUtil.moveTowards(current: Vector3, target: Vector3, maxDelta: number): Vector3
+	local delta = target - current
+	local distance = delta.Magnitude
+	if distance <= maxDelta or distance < EPSILON then
+		return target
+	end
+	return current + delta * (maxDelta / distance)
+end
+
+--[[
+	Interpolation exponentielle indépendante du framerate.
+	`smoothing` = fraction restante après 1 seconde (ex. 0.01 = très réactif).
+]]
+function VectorUtil.damp(current: Vector3, target: Vector3, smoothing: number, dt: number): Vector3
+	local alpha = 1 - math.pow(math.clamp(smoothing, 1e-9, 1), dt)
+	return current:Lerp(target, alpha)
+end
+
+function VectorUtil.dampNumber(current: number, target: number, smoothing: number, dt: number): number
+	local alpha = 1 - math.pow(math.clamp(smoothing, 1e-9, 1), dt)
+	return current + (target - current) * alpha
+end
+
+--[[ Angle (degrés) entre deux vecteurs. ]]
+function VectorUtil.angleBetween(a: Vector3, b: Vector3): number
+	local ua, ub = VectorUtil.safeUnit(a), VectorUtil.safeUnit(b)
+	if ua.Magnitude < EPSILON or ub.Magnitude < EPSILON then
+		return 0
+	end
+	return math.deg(math.acos(math.clamp(ua:Dot(ub), -1, 1)))
+end
+
+--[[ Angle signé (degrés) de `a` vers `b` autour de `axis`. ]]
+function VectorUtil.signedAngle(a: Vector3, b: Vector3, axis: Vector3): number
+	local unsigned = VectorUtil.angleBetween(a, b)
+	local sign = math.sign(a:Cross(b):Dot(axis))
+	return unsigned * (sign == 0 and 1 or sign)
+end
+
+--[[ Interpolation sphérique entre deux directions. ]]
+function VectorUtil.slerp(from: Vector3, to: Vector3, alpha: number): Vector3
+	local a, b = VectorUtil.safeUnit(from), VectorUtil.safeUnit(to)
+	local dot = math.clamp(a:Dot(b), -1, 1)
+	if dot > 0.9995 then
+		return VectorUtil.safeUnit(a:Lerp(b, alpha))
+	end
+	local theta = math.acos(dot) * alpha
+	local relative = VectorUtil.safeUnit(b - a * dot)
+	return a * math.cos(theta) + relative * math.sin(theta)
+end
+
+--[[ Retourne un repère orthonormé quelconque dont l'axe Y vaut `up`. ]]
+function VectorUtil.orthonormalBasis(up: Vector3): (Vector3, Vector3, Vector3)
+	local y = VectorUtil.safeUnit(up)
+	if y.Magnitude < EPSILON then
+		return Vector3.xAxis, Vector3.yAxis, Vector3.zAxis
+	end
+	local reference = math.abs(y.Y) > 0.99 and Vector3.xAxis or Vector3.yAxis
+	local x = VectorUtil.safeUnit(reference:Cross(y))
+	local z = y:Cross(x)
+	return x, y, z
+end
+
+--[[ Composante horizontale par rapport à un "haut" arbitraire. ]]
+function VectorUtil.flatten(v: Vector3, up: Vector3?): Vector3
+	return VectorUtil.projectOnPlane(v, up or Vector3.yAxis)
+end
+
+--[[
+	Direction aléatoire dans un cône.
+	`spreadDegrees` est le demi-angle du cône.
+]]
+function VectorUtil.randomInCone(direction: Vector3, spreadDegrees: number, rng: Random?): Vector3
+	local random = rng or Random.new()
+	local forward = VectorUtil.safeUnit(direction)
+	if forward.Magnitude < EPSILON then
+		return Vector3.zAxis
+	end
+	local right, _, _ = VectorUtil.orthonormalBasis(forward)
+	local upAxis = forward:Cross(right)
+
+	-- cos uniforme => répartition uniforme sur la calotte sphérique
+	local cosMax = math.cos(math.rad(spreadDegrees))
+	local cosTheta = 1 - random:NextNumber() * (1 - cosMax)
+	local sinTheta = math.sqrt(math.max(0, 1 - cosTheta * cosTheta))
+	local phi = random:NextNumber() * math.pi * 2
+
+	return forward * cosTheta + right * (sinTheta * math.cos(phi)) + upAxis * (sinTheta * math.sin(phi))
+end
+
+--[[ Vélocité d'un point d'un assemblage rigide (rotation comprise). ]]
+function VectorUtil.velocityAtPoint(part: BasePart, worldPosition: Vector3): Vector3
+	local center = part.AssemblyCenterOfMass
+	local angular = part.AssemblyAngularVelocity
+	return part.AssemblyLinearVelocity + angular:Cross(worldPosition - center)
+end
+
+--[[ Vrai si le vecteur contient un NaN ou un infini. ]]
+function VectorUtil.isFinite(v: Vector3): boolean
+	return v.X == v.X
+		and v.Y == v.Y
+		and v.Z == v.Z
+		and math.abs(v.X) ~= math.huge
+		and math.abs(v.Y) ~= math.huge
+		and math.abs(v.Z) ~= math.huge
+end
+
+--[[ Remplace un vecteur invalide par une valeur de repli. ]]
+function VectorUtil.sanitize(v: Vector3, fallback: Vector3?): Vector3
+	if VectorUtil.isFinite(v) then
+		return v
+	end
+	return fallback or Vector3.zero
+end
+
+return VectorUtil
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX7"><Properties><string name="Name">RaycastUtil</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	RaycastUtil.luau
+	Helpers de lancer de rayons : paramètres réutilisables, casts ignorant
+	dynamiquement certaines pièces, sondes de sol multi-rayons, ligne de vue.
+]]
+
+local Workspace = game:GetService("Workspace")
+
+local VectorUtil = require(script.Parent.VectorUtil)
+
+local RaycastUtil = {}
+
+--[[ Crée un RaycastParams "exclusion" prêt à l'emploi. ]]
+function RaycastUtil.params(ignoreList: { Instance }?, collisionGroup: string?, ignoreWater: boolean?): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = ignoreList or {}
+	params.IgnoreWater = ignoreWater ~= false
+	params.RespectCanCollide = true
+	if collisionGroup then
+		params.CollisionGroup = collisionGroup
+	end
+	return params
+end
+
+--[[
+	Lance un rayon en ignorant à la volée les pièces refusées par `shouldIgnore`.
+	Utile quand le filtre ne peut pas être connu à l'avance (ex. traverser
+	les vitres mais pas les murs).
+]]
+function RaycastUtil.castIgnoring(
+	origin: Vector3,
+	direction: Vector3,
+	params: RaycastParams,
+	shouldIgnore: (result: RaycastResult) -> boolean,
+	maxAttempts: number?
+): RaycastResult?
+	local attempts = maxAttempts or 8
+	local ignored: { Instance } = table.clone(params.FilterDescendantsInstances)
+	local workingParams = params
+	local currentOrigin = origin
+	local remaining = direction
+
+	for _ = 1, attempts do
+		local result = Workspace:Raycast(currentOrigin, remaining, workingParams)
+		if not result then
+			return nil
+		end
+		if not shouldIgnore(result) then
+			return result
+		end
+
+		table.insert(ignored, result.Instance)
+		workingParams = RaycastParams.new()
+		workingParams.FilterType = Enum.RaycastFilterType.Exclude
+		workingParams.FilterDescendantsInstances = ignored
+		workingParams.IgnoreWater = params.IgnoreWater
+		workingParams.CollisionGroup = params.CollisionGroup
+		workingParams.RespectCanCollide = params.RespectCanCollide
+
+		local travelled = (result.Position - currentOrigin).Magnitude
+		local leftover = remaining.Magnitude - travelled
+		if leftover <= 1e-3 then
+			return nil
+		end
+		currentOrigin = result.Position
+		remaining = VectorUtil.safeUnit(remaining) * leftover
+	end
+	return nil
+end
+
+--[[
+	Spherecast avec repli automatique sur un raycast si la forme n'est pas
+	supportée (anciens clients, cas dégénérés).
+]]
+function RaycastUtil.sphereCast(
+	origin: Vector3,
+	radius: number,
+	direction: Vector3,
+	params: RaycastParams
+): RaycastResult?
+	if radius > 0 then
+		local ok, result = pcall(function()
+			return Workspace:Spherecast(origin, radius, direction, params)
+		end)
+		if ok then
+			return result
+		end
+	end
+	return Workspace:Raycast(origin, direction, params)
+end
+
+--[[
+	Sonde de sol robuste.
+
+	Un rayon unique produit une normale qui saute d'une face à l'autre sur les
+	arêtes, ce qui fait vibrer les contrôleurs. On tire donc un rayon central
+	plus une couronne de rayons, et on moyenne les normales du contact le plus
+	haut. `samples = 0` retombe sur un seul rayon (moins cher).
+]]
+function RaycastUtil.groundProbe(
+	origin: Vector3,
+	up: Vector3,
+	distance: number,
+	radius: number,
+	params: RaycastParams,
+	samples: number?
+): (RaycastResult?, Vector3)
+	local down = -VectorUtil.safeUnit(up) * distance
+	local best = Workspace:Raycast(origin, down, params)
+	local accumulatedNormal = best and best.Normal or Vector3.zero
+	local count = best and 1 or 0
+
+	local ringSamples = samples or 4
+	if ringSamples > 0 and radius > 0 then
+		local right, _, forward = VectorUtil.orthonormalBasis(up)
+		for i = 1, ringSamples do
+			local angle = (i - 1) / ringSamples * math.pi * 2
+			local offset = right * (math.cos(angle) * radius) + forward * (math.sin(angle) * radius)
+			local result = Workspace:Raycast(origin + offset, down, params)
+			if result then
+				accumulatedNormal += result.Normal
+				count += 1
+				if not best or result.Distance < best.Distance then
+					best = result
+				end
+			end
+		end
+	end
+
+	if count == 0 then
+		return nil, up
+	end
+	return best, VectorUtil.safeUnit(accumulatedNormal / count)
+end
+
+--[[ Vrai s'il n'y a aucun obstacle entre deux points. ]]
+function RaycastUtil.lineOfSight(from: Vector3, to: Vector3, params: RaycastParams): (boolean, RaycastResult?)
+	local delta = to - from
+	if delta.Magnitude < 1e-4 then
+		return true, nil
+	end
+	local result = Workspace:Raycast(from, delta, params)
+	return result == nil, result
+end
+
+--[[
+	Mesure l'épaisseur d'un obstacle en le retraversant depuis l'autre côté.
+	Renvoie (épaisseur, point de sortie) ou nil si le mur dépasse `maxThickness`.
+]]
+function RaycastUtil.measureThickness(
+	entryPosition: Vector3,
+	direction: Vector3,
+	maxThickness: number,
+	target: BasePart
+): (number?, Vector3?)
+	local unit = VectorUtil.safeUnit(direction)
+	local span = maxThickness + 0.1
+	local farSide = entryPosition + unit * span
+
+	local exitParams = RaycastParams.new()
+	exitParams.FilterType = Enum.RaycastFilterType.Include
+	exitParams.FilterDescendantsInstances = { target }
+
+	local exit = Workspace:Raycast(farSide, -unit * span, exitParams)
+	if not exit then
+		return nil, nil
+	end
+	local thickness = (exit.Position - entryPosition).Magnitude
+	if thickness > maxThickness then
+		return nil, nil
+	end
+	return thickness, exit.Position
+end
+
+--[[ OverlapParams d'exclusion, pendant de RaycastUtil.params. ]]
+function RaycastUtil.overlapParams(ignoreList: { Instance }?, collisionGroup: string?, maxParts: number?): OverlapParams
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = ignoreList or {}
+	params.MaxParts = maxParts or 0
+	params.RespectCanCollide = false
+	if collisionGroup then
+		params.CollisionGroup = collisionGroup
+	end
+	return params
+end
+
+return RaycastUtil
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX8"><Properties><string name="Name">Spring</string><ProtectedString name="Source"><![CDATA[--!strict
+--[[
+	Spring.luau
+	Ressorts amortis à intégration semi-implicite.
+
+	Pourquoi pas un simple lerp ? Un lerp dépend du framerate et n'a pas
+	d'inertie. Ici on résout analytiquement l'équation du ressort amorti,
+	ce qui est *inconditionnellement stable* : même à 5 FPS ou avec une
+	raideur absurde, la simulation n'explose jamais.
+
+		x'' = f² (target - x) - 2 z f x'
+
+	frequency : pulsation propre (oscillations/s * 2π ~ réactivité)
+	damping   : facteur d'amortissement
+	            < 1 -> rebondit, = 1 -> critique (pas d'overshoot), > 1 -> mou
+]]
+
+local Spring = {}
+
+--============================================================
+-- Noyau commun (fonctionne pour un scalaire comme pour un Vector3,
+-- seules les opérations +, -, * scalaire sont utilisées)
+--============================================================
+
+local function solveCoefficients(frequency: number, damping: number, dt: number): (number, number, number, number)
+	local f = 1 + 2 * dt * damping * frequency
+	local omegaSq = frequency * frequency
+	local hOmegaSq = dt * omegaSq
+	local hhOmegaSq = dt * hOmegaSq
+	local detInv = 1 / (f + hhOmegaSq)
+	return f, hOmegaSq, hhOmegaSq, detInv
+end
+
+--============================================================
+-- RESSORT VECTORIEL
+--============================================================
+
+local VectorSpring = {}
+VectorSpring.__index = VectorSpring
+
+export type VectorSpring = typeof(setmetatable(
+	{} :: {
+		position: Vector3,
+		velocity: Vector3,
+		target: Vector3,
+		frequency: number,
+		damping: number,
+	},
+	VectorSpring
+))
+
+function Spring.vector(frequency: number, damping: number, initial: Vector3?): VectorSpring
+	local value = initial or Vector3.zero
+	return setmetatable({
+		position = value,
+		velocity = Vector3.zero,
+		target = value,
+		frequency = frequency,
+		damping = damping,
+	}, VectorSpring)
+end
+
+function VectorSpring.update(self: VectorSpring, dt: number): Vector3
+	if dt <= 0 then
+		return self.position
+	end
+	local f, hOmegaSq, hhOmegaSq, detInv = solveCoefficients(self.frequency, self.damping, dt)
+	local detX = self.position * f + self.velocity * dt + self.target * hhOmegaSq
+	local detV = self.velocity + (self.target - self.position) * hOmegaSq
+	self.position = detX * detInv
+	self.velocity = detV * detInv
+	return self.position
+end
+
+function VectorSpring.impulse(self: VectorSpring, velocity: Vector3)
+	self.velocity += velocity
+end
+
+function VectorSpring.reset(self: VectorSpring, value: Vector3)
+	self.position = value
+	self.target = value
+	self.velocity = Vector3.zero
+end
+
+--============================================================
+-- RESSORT SCALAIRE
+--============================================================
+
+local NumberSpring = {}
+NumberSpring.__index = NumberSpring
+
+export type NumberSpring = typeof(setmetatable(
+	{} :: {
+		position: number,
+		velocity: number,
+		target: number,
+		frequency: number,
+		damping: number,
+	},
+	NumberSpring
+))
+
+function Spring.number(frequency: number, damping: number, initial: number?): NumberSpring
+	local value = initial or 0
+	return setmetatable({
+		position = value,
+		velocity = 0,
+		target = value,
+		frequency = frequency,
+		damping = damping,
+	}, NumberSpring)
+end
+
+function NumberSpring.update(self: NumberSpring, dt: number): number
+	if dt <= 0 then
+		return self.position
+	end
+	local f, hOmegaSq, hhOmegaSq, detInv = solveCoefficients(self.frequency, self.damping, dt)
+	local detX = self.position * f + self.velocity * dt + self.target * hhOmegaSq
+	local detV = self.velocity + (self.target - self.position) * hOmegaSq
+	self.position = detX * detInv
+	self.velocity = detV * detInv
+	return self.position
+end
+
+function NumberSpring.impulse(self: NumberSpring, velocity: number)
+	self.velocity += velocity
+end
+
+function NumberSpring.reset(self: NumberSpring, value: number)
+	self.position = value
+	self.target = value
+	self.velocity = 0
+end
+
+--============================================================
+-- HELPERS SANS ÉTAT
+--============================================================
+
+--[[
+	Force d'un ressort-amortisseur classique, à appliquer directement.
+	`displacement` : écart par rapport au repos (positif = comprimé)
+	`relativeVelocity` : vitesse relative le long de l'axe du ressort
+]]
+function Spring.force(displacement: number, relativeVelocity: number, stiffness: number, damper: number): number
+	return displacement * stiffness - relativeVelocity * damper
+end
+
+--[[ Convertit "je veux atteindre X en T secondes sans dépasser" en fréquence. ]]
+function Spring.frequencyForSettleTime(settleTime: number): number
+	-- pour un amortissement critique, ~99 % atteint en 6.64 / f secondes
+	return 6.64 / math.max(settleTime, 1e-3)
+end
+
+return Spring
+]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX9"><Properties><string name="Name">Solvers</string></Properties><Item class="ModuleScript" referent="RBX10"><Properties><string name="Name">Integrator</string><ProtectedString name="Source"><![CDATA[--!strict
+--[[
+	Integrator.luau
+	Intégrateurs numériques pour les corps simulés à la main (projectiles,
+	particules de corde, orbites...).
+
+	- semiImplicitEuler : rapide, stable pour les forces classiques
+	- rk4               : 4e ordre, indispensable dès que l'accélération
+	                      dépend fortement de la vitesse (traînée quadratique,
+	                      Magnus, gravité orbitale)
+	- substep           : découpe un dt en pas bornés
+]]
+
+local Integrator = {}
+
+export type AccelerationFn = (position: Vector3, velocity: Vector3, t: number) -> Vector3
+
+--[[
+	Euler semi-implicite : v += a*dt ; x += v*dt
+	Conserve bien mieux l'énergie qu'un Euler explicite, pour le même coût.
+]]
+function Integrator.semiImplicitEuler(
+	position: Vector3,
+	velocity: Vector3,
+	dt: number,
+	accelerationFn: AccelerationFn,
+	t: number?
+): (Vector3, Vector3)
+	local acceleration = accelerationFn(position, velocity, t or 0)
+	local newVelocity = velocity + acceleration * dt
+	local newPosition = position + newVelocity * dt
+	return newPosition, newVelocity
+end
+
+--[[
+	Runge-Kutta 4 pour l'EDO du second ordre x'' = a(x, x', t).
+	Coût : 4 évaluations de l'accélération, précision d'ordre 4.
+]]
+function Integrator.rk4(
+	position: Vector3,
+	velocity: Vector3,
+	dt: number,
+	accelerationFn: AccelerationFn,
+	t: number?
+): (Vector3, Vector3)
+	local time = t or 0
+	local half = dt * 0.5
+
+	local k1v = accelerationFn(position, velocity, time)
+	local k1x = velocity
+
+	local k2v = accelerationFn(position + k1x * half, velocity + k1v * half, time + half)
+	local k2x = velocity + k1v * half
+
+	local k3v = accelerationFn(position + k2x * half, velocity + k2v * half, time + half)
+	local k3x = velocity + k2v * half
+
+	local k4v = accelerationFn(position + k3x * dt, velocity + k3v * dt, time + dt)
+	local k4x = velocity + k3v * dt
+
+	local newPosition = position + (k1x + (k2x + k3x) * 2 + k4x) * (dt / 6)
+	local newVelocity = velocity + (k1v + (k2v + k3v) * 2 + k4v) * (dt / 6)
+	return newPosition, newVelocity
+end
+
+--[[
+	Verlet à vitesse : très stable, réversible, idéal pour les particules
+	dont l'accélération ne dépend pas de la vitesse.
+]]
+function Integrator.velocityVerlet(
+	position: Vector3,
+	velocity: Vector3,
+	acceleration: Vector3,
+	dt: number,
+	accelerationFn: AccelerationFn,
+	t: number?
+): (Vector3, Vector3, Vector3)
+	local newPosition = position + velocity * dt + acceleration * (0.5 * dt * dt)
+	local newAcceleration = accelerationFn(newPosition, velocity + acceleration * dt, (t or 0) + dt)
+	local newVelocity = velocity + (acceleration + newAcceleration) * (0.5 * dt)
+	return newPosition, newVelocity, newAcceleration
+end
+
+--[[
+	Découpe `dt` en pas d'au plus `maxStep` et appelle `fn` pour chacun.
+	Le dernier pas absorbe le reste, donc la somme vaut exactement `dt`.
+	`maxSteps` borne le coût si dt est énorme.
+]]
+function Integrator.substep(dt: number, maxStep: number, maxSteps: number, fn: (stepDt: number) -> boolean?)
+	if dt <= 0 then
+		return
+	end
+	local steps = math.min(math.max(1, math.ceil(dt / maxStep)), maxSteps)
+	local stepDt = dt / steps
+	for _ = 1, steps do
+		if fn(stepDt) == false then
+			return
+		end
+	end
+end
+
+--[[
+	Prédit la position d'un projectile balistique simple (sans traînée).
+	Pratique pour tracer une trajectoire de grenade côté client.
+]]
+function Integrator.ballisticPosition(origin: Vector3, velocity: Vector3, gravity: Vector3, t: number): Vector3
+	return origin + velocity * t + gravity * (0.5 * t * t)
+end
+
+--[[
+	Vitesse initiale pour atteindre `target` depuis `origin` en `time` secondes.
+	Renvoie nil si `time` est nul.
+]]
+function Integrator.solveLaunchVelocity(origin: Vector3, target: Vector3, gravity: Vector3, time: number): Vector3?
+	if time <= 1e-4 then
+		return nil
+	end
+	return (target - origin - gravity * (0.5 * time * time)) / time
+end
+
+--[[
+	Résout l'angle de tir balistique vers une cible (solution basse par défaut).
+	`speed` est la vitesse initiale imposée. Renvoie nil si hors de portée.
+]]
+function Integrator.solveBallisticArc(
+	origin: Vector3,
+	target: Vector3,
+	speed: number,
+	gravityMagnitude: number,
+	useHighArc: boolean?
+): Vector3?
+	local delta = target - origin
+	local horizontal = Vector3.new(delta.X, 0, delta.Z)
+	local horizontalDistance = horizontal.Magnitude
+	local verticalDistance = delta.Y
+
+	if horizontalDistance < 1e-4 then
+		return Vector3.new(0, speed * math.sign(verticalDistance == 0 and 1 or verticalDistance), 0)
+	end
+
+	local speedSq = speed * speed
+	local discriminant = speedSq * speedSq
+		- gravityMagnitude
+			* (gravityMagnitude * horizontalDistance * horizontalDistance + 2 * verticalDistance * speedSq)
+
+	if discriminant < 0 then
+		return nil -- cible hors de portée à cette vitesse
+	end
+
+	local root = math.sqrt(discriminant)
+	local angle = math.atan((speedSq + (useHighArc and root or -root)) / (gravityMagnitude * horizontalDistance))
+
+	local horizontalUnit = horizontal / horizontalDistance
+	return horizontalUnit * (math.cos(angle) * speed) + Vector3.yAxis * (math.sin(angle) * speed)
+end
+
+return Integrator
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX11"><Properties><string name="Name">Aerodynamics</string><ProtectedString name="Source"><![CDATA[--!strict
+--[[
+	Aerodynamics.luau
+	Traînée, portance et effet Magnus.
+
+	Conversion d'unités : les coefficients aéro sont en SI (kg/m³, m², m/s)
+	alors que Roblox raisonne en studs. On convertit la vitesse en m/s,
+	on calcule la force en newtons, puis on repasse l'accélération en studs/s².
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local Aerodynamics = {}
+
+local STUDS_PER_METER = Config.Environment.StudsPerMeter
+
+export type DragProfile = {
+	dragCoefficient: number, -- Cd
+	crossSection: number, -- m²
+	density: number?, -- kg/m³ (défaut : air)
+	wind: Vector3?, -- studs/s
+}
+
+--[[
+	Traînée quadratique : F = -½ ρ Cd A |v|² v̂
+	Renvoie une force en newtons, orientée en coordonnées Roblox.
+]]
+function Aerodynamics.dragForce(velocity: Vector3, profile: DragProfile): Vector3
+	local wind = profile.wind or Config.Environment.Wind
+	local relative = velocity - wind
+	local speedStuds = relative.Magnitude
+	if speedStuds < 1e-4 then
+		return Vector3.zero
+	end
+
+	local speedMeters = speedStuds / STUDS_PER_METER
+	local density = profile.density or Config.Environment.AirDensity
+	local magnitude = 0.5 * density * profile.dragCoefficient * profile.crossSection * speedMeters * speedMeters
+
+	return -VectorUtil.safeUnit(relative) * magnitude
+end
+
+--[[
+	Traînée linéaire (régime de Stokes / amortissement visqueux).
+	Plus simple à régler quand on cherche un "feeling" plutôt que du réalisme.
+]]
+function Aerodynamics.linearDragForce(velocity: Vector3, coefficient: number, wind: Vector3?): Vector3
+	local relative = velocity - (wind or Config.Environment.Wind)
+	return -relative * coefficient
+end
+
+--[[
+	Effet Magnus : F = S (ω × v)
+	Une balle en rotation dévie perpendiculairement à son axe de rotation :
+	c'est ce qui fait courber un tir brossé au football.
+]]
+function Aerodynamics.magnusForce(spin: Vector3, velocity: Vector3, coefficient: number, wind: Vector3?): Vector3
+	local relative = velocity - (wind or Config.Environment.Wind)
+	if relative.Magnitude < 1e-4 or spin.Magnitude < 1e-4 then
+		return Vector3.zero
+	end
+	return spin:Cross(relative) * coefficient
+end
+
+--[[
+	Portance d'une surface : F = ½ ρ Cl A |v|² n̂
+	`normal` est la normale de la surface portante (aile, aileron).
+]]
+function Aerodynamics.liftForce(
+	velocity: Vector3,
+	normal: Vector3,
+	liftCoefficient: number,
+	area: number,
+	density: number?
+): Vector3
+	local speedMeters = velocity.Magnitude / STUDS_PER_METER
+	if speedMeters < 1e-4 then
+		return Vector3.zero
+	end
+	local rho = density or Config.Environment.AirDensity
+	local magnitude = 0.5 * rho * liftCoefficient * area * speedMeters * speedMeters
+	return VectorUtil.safeUnit(normal) * magnitude
+end
+
+--[[
+	Amortissement de la rotation par frottement de l'air.
+	Renvoie une variation de vitesse angulaire (rad/s) à retrancher.
+]]
+function Aerodynamics.angularDrag(spin: Vector3, coefficient: number, dt: number): Vector3
+	local factor = math.exp(-coefficient * dt)
+	return spin * factor
+end
+
+--[[
+	Vitesse terminale (studs/s) d'un objet en chute libre avec traînée.
+	Utile pour vérifier qu'un réglage n'est pas absurde.
+]]
+function Aerodynamics.terminalVelocity(mass: number, gravity: number, profile: DragProfile): number
+	local density = profile.density or Config.Environment.AirDensity
+	local denominator = 0.5 * density * profile.dragCoefficient * profile.crossSection
+	if denominator <= 0 then
+		return math.huge
+	end
+	local gravityMeters = gravity / STUDS_PER_METER
+	return math.sqrt(mass * gravityMeters / denominator) * STUDS_PER_METER
+end
+
+--[[
+	Accélération totale d'un projectile : gravité + traînée + Magnus.
+	Signature compatible avec Integrator.rk4 via une fermeture.
+]]
+export type ProjectileForces = {
+	mass: number,
+	gravity: Vector3, -- studs/s²
+	drag: DragProfile,
+	spin: Vector3?,
+	magnusCoefficient: number?,
+}
+
+function Aerodynamics.projectileAcceleration(velocity: Vector3, forces: ProjectileForces): Vector3
+	local mass = math.max(forces.mass, 1e-6)
+	local force = Aerodynamics.dragForce(velocity, forces.drag)
+
+	if forces.spin and forces.magnusCoefficient then
+		force += Aerodynamics.magnusForce(forces.spin, velocity, forces.magnusCoefficient, forces.drag.wind)
+	end
+
+	-- N -> m/s² -> studs/s²
+	local accelerationStuds = (force / mass) * STUDS_PER_METER
+	return forces.gravity + accelerationStuds
+end
+
+return Aerodynamics
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX12"><Properties><string name="Name">Buoyancy</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	Buoyancy.luau
+	Flottabilité, traînée fluide et couple de redressement.
+
+	Principe d'Archimède : une pièce immergée subit vers le haut le poids
+	du fluide déplacé. En calculant la fraction immergée à partir de la
+	boîte englobante orientée, on obtient un bateau qui tangue correctement
+	sans simuler le maillage.
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local Buoyancy = {}
+
+local STUDS_PER_METER = Config.Environment.StudsPerMeter
+local STUDS3_PER_M3 = STUDS_PER_METER ^ 3
+
+export type WaterVolume = {
+	surfaceY: number, -- niveau de l'eau (monde)
+	density: number?, -- kg/m³
+	current: Vector3?, -- courant, studs/s
+	linearDrag: number?, -- amortissement linéaire dans l'eau
+	quadraticDrag: number?, -- amortissement quadratique
+	angularDrag: number?, -- amortissement de la rotation
+	uprightStrength: number?, -- couple de redressement (0 = aucun)
+	waveAmplitude: number?, -- houle sinusoïdale optionnelle
+	waveLength: number?,
+	waveSpeed: number?,
+}
+
+--[[ Hauteur locale de la surface, houle comprise. ]]
+function Buoyancy.surfaceAt(volume: WaterVolume, position: Vector3, clock: number?): number
+	local amplitude = volume.waveAmplitude
+	if not amplitude or amplitude <= 0 then
+		return volume.surfaceY
+	end
+	local length = volume.waveLength or 40
+	local speed = volume.waveSpeed or 6
+	local t = clock or os.clock()
+	local k = (math.pi * 2) / math.max(length, 1e-3)
+	-- deux trains d'ondes croisés : évite l'aspect "tôle ondulée"
+	local a = math.sin(position.X * k + t * speed)
+	local b = math.sin(position.Z * k * 0.83 + t * speed * 1.17)
+	return volume.surfaceY + (a + b) * 0.5 * amplitude
+end
+
+--[[
+	Demi-hauteur verticale de la boîte englobante orientée d'une pièce.
+	On projette les trois demi-axes locaux sur l'axe Y du monde.
+]]
+local function verticalHalfExtent(part: BasePart): number
+	local cf = part.CFrame
+	local size = part.Size
+	return 0.5
+		* (
+			math.abs(cf.RightVector.Y) * size.X
+			+ math.abs(cf.UpVector.Y) * size.Y
+			+ math.abs(cf.LookVector.Y) * size.Z
+		)
+end
+
+--[[
+	Fraction immergée d'une pièce, de 0 (à sec) à 1 (totalement sous l'eau).
+]]
+function Buoyancy.submergedFraction(part: BasePart, volume: WaterVolume, clock: number?): number
+	local halfExtent = verticalHalfExtent(part)
+	if halfExtent <= 1e-4 then
+		return part.Position.Y < Buoyancy.surfaceAt(volume, part.Position, clock) and 1 or 0
+	end
+	local surface = Buoyancy.surfaceAt(volume, part.Position, clock)
+	local bottom = part.Position.Y - halfExtent
+	local depth = surface - bottom
+	return math.clamp(depth / (halfExtent * 2), 0, 1)
+end
+
+--[[
+	Calcule (force, couple) à appliquer à une pièce immergée.
+	La force est en newtons-Roblox (masse * studs/s²), donc directement
+	utilisable avec ApplyImpulse(force * dt) ou VectorForce.Force.
+]]
+function Buoyancy.solve(
+	part: BasePart,
+	volume: WaterVolume,
+	gravity: number?,
+	clock: number?
+): (Vector3, Vector3, number)
+	local fraction = Buoyancy.submergedFraction(part, volume, clock)
+	if fraction <= 0 then
+		return Vector3.zero, Vector3.zero, 0
+	end
+
+	local g = gravity or workspace.Gravity
+	local fluidDensity = volume.density or Config.Environment.WaterDensity
+
+	-- Volume déplacé, converti studs³ -> m³
+	local sizeStuds = part.Size
+	local volumeStuds3 = sizeStuds.X * sizeStuds.Y * sizeStuds.Z
+	local displacedM3 = (volumeStuds3 * fraction) / STUDS3_PER_M3
+
+	-- Poussée d'Archimède : ρ V g, orientée vers le haut
+	local buoyantForce = Vector3.yAxis * (fluidDensity * displacedM3 * g)
+
+	-- Traînée fluide (linéaire + quadratique), relative au courant
+	local current = volume.current or Vector3.zero
+	local relative = part.AssemblyLinearVelocity - current
+	local speed = relative.Magnitude
+	local linear = volume.linearDrag or 2.5
+	local quadratic = volume.quadraticDrag or 0.12
+	local mass = part.AssemblyMass
+
+	local dragForce = Vector3.zero
+	if speed > 1e-4 then
+		local magnitude = (linear * speed + quadratic * speed * speed) * mass * fraction
+		dragForce = -VectorUtil.safeUnit(relative) * magnitude
+	end
+
+	-- Couple : amortissement angulaire + redressement vers la verticale
+	local angularDrag = volume.angularDrag or 3.0
+	local torque = -part.AssemblyAngularVelocity * (angularDrag * mass * fraction)
+
+	local uprightStrength = volume.uprightStrength or 0
+	if uprightStrength > 0 then
+		local up = part.CFrame.UpVector
+		local axis = up:Cross(Vector3.yAxis)
+		torque += axis * (uprightStrength * mass * fraction)
+	end
+
+	return buoyantForce + dragForce, torque, fraction
+end
+
+--[[
+	Applique directement la flottabilité à une pièce pour un pas `dt`.
+	À appeler dans RunService.PreSimulation.
+]]
+function Buoyancy.apply(part: BasePart, volume: WaterVolume, dt: number, clock: number?): number
+	local force, torque, fraction = Buoyancy.solve(part, volume, workspace.Gravity, clock)
+	if fraction <= 0 then
+		return 0
+	end
+	part:ApplyImpulse(force * dt)
+	part:ApplyAngularImpulse(torque * dt)
+	return fraction
+end
+
+--[[
+	Crée un flotteur persistant : plusieurs points de poussée répartis sur
+	la pièce, ce qui produit un vrai tangage/roulis (un bateau se redresse,
+	une caisse bascule). `points` sont en espace local.
+]]
+export type Floater = {
+	part: BasePart,
+	volume: WaterVolume,
+	points: { Vector3 },
+	step: (self: any, dt: number) -> (),
+	destroy: (self: any) -> (),
+}
+
+local FloaterImpl = {}
+FloaterImpl.__index = FloaterImpl
+
+function Buoyancy.createFloater(part: BasePart, volume: WaterVolume, points: { Vector3 }?): Floater
+	local resolved = points
+	if not resolved then
+		-- 4 points aux coins de la face inférieure : suffisant pour flotter droit
+		local half = part.Size * 0.5
+		resolved = {
+			Vector3.new(-half.X * 0.7, -half.Y * 0.5, -half.Z * 0.7),
+			Vector3.new(half.X * 0.7, -half.Y * 0.5, -half.Z * 0.7),
+			Vector3.new(-half.X * 0.7, -half.Y * 0.5, half.Z * 0.7),
+			Vector3.new(half.X * 0.7, -half.Y * 0.5, half.Z * 0.7),
+		}
+	end
+
+	return setmetatable({
+		part = part,
+		volume = volume,
+		points = resolved,
+		_alive = true,
+	}, FloaterImpl) :: any
+end
+
+function FloaterImpl.step(self, dt: number)
+	if not self._alive or not self.part.Parent then
+		return
+	end
+
+	local part: BasePart = self.part
+	local volume: WaterVolume = self.volume
+	local clock = os.clock()
+	local pointCount = #self.points
+	if pointCount == 0 then
+		return
+	end
+
+	local g = workspace.Gravity
+	local fluidDensity = volume.density or Config.Environment.WaterDensity
+	local size = part.Size
+	local volumePerPoint = (size.X * size.Y * size.Z) / STUDS3_PER_M3 / pointCount
+	local current = volume.current or Vector3.zero
+	local linear = volume.linearDrag or 2.5
+	local quadratic = volume.quadraticDrag or 0.12
+	local massPerPoint = part.AssemblyMass / pointCount
+	local depthScale = math.max(size.Y, 1e-3)
+
+	for _, localPoint in self.points do
+		local worldPoint = part.CFrame:PointToWorldSpace(localPoint)
+		local surface = Buoyancy.surfaceAt(volume, worldPoint, clock)
+		local depth = surface - worldPoint.Y
+		if depth <= 0 then
+			continue
+		end
+
+		local submersion = math.clamp(depth / depthScale, 0, 1)
+		local buoyantForce = Vector3.yAxis * (fluidDensity * volumePerPoint * submersion * g)
+
+		local pointVelocity = VectorUtil.velocityAtPoint(part, worldPoint) - current
+		local speed = pointVelocity.Magnitude
+		local dragForce = Vector3.zero
+		if speed > 1e-4 then
+			local magnitude = (linear * speed + quadratic * speed * speed) * massPerPoint * submersion
+			dragForce = -VectorUtil.safeUnit(pointVelocity) * magnitude
+		end
+
+		part:ApplyImpulseAtPosition((buoyantForce + dragForce) * dt, worldPoint)
+	end
+
+	local angularDrag = volume.angularDrag or 3.0
+	if angularDrag > 0 then
+		part:ApplyAngularImpulse(-part.AssemblyAngularVelocity * (angularDrag * part.AssemblyMass * dt))
+	end
+end
+
+function FloaterImpl.destroy(self)
+	self._alive = false
+end
+
+return Buoyancy
+]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX13"><Properties><string name="Name">Modules</string></Properties><Item class="ModuleScript" referent="RBX14"><Properties><string name="Name">GravityField</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	GravityField.luau
+	Gravité arbitraire : planètes sphériques, murs "walkable", zones
+	anti-gravité, trous noirs.
+
+	Fonctionnement : Roblox applique toujours sa gravité verticale. On la
+	*compense* avec une force opposée, puis on ajoute la gravité voulue.
+	Résultat : `workspace.Gravity` peut rester à sa valeur par défaut et
+	seuls les objets enregistrés changent de comportement.
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local GravityField = {}
+
+export type FieldKind = "Directional" | "Point" | "Sphere" | "Box" | "Custom"
+
+export type Field = {
+	id: string,
+	kind: FieldKind,
+	priority: number,
+	strength: number,
+	direction: Vector3?,
+	origin: Vector3?,
+	radius: number?,
+	falloff: string,
+	part: BasePart?,
+	compute: ((position: Vector3) -> Vector3?)?,
+	blend: number,
+	enabled: boolean,
+}
+
+local fields: { Field } = {}
+local nextId = 0
+
+--============================================================
+-- ENREGISTREMENT
+--============================================================
+
+--[[
+	Ajoute un champ. Renvoie son identifiant, à passer à `remove`.
+
+	Exemples :
+		-- planète
+		GravityField.add({ kind = "Point", origin = planet.Position,
+		                   radius = 400, strength = 196.2 })
+		-- couloir où l'on marche au plafond
+		GravityField.add({ kind = "Box", part = zone,
+		                   direction = Vector3.yAxis, strength = 120 })
+]]
+function GravityField.add(definition): string
+	nextId += 1
+	local id = definition.id or `field_{nextId}`
+
+	local field: Field = {
+		id = id,
+		kind = definition.kind,
+		priority = definition.priority or 0,
+		strength = definition.strength or Config.Environment.DefaultGravity,
+		direction = definition.direction,
+		origin = definition.origin,
+		radius = definition.radius,
+		falloff = definition.falloff or "None",
+		part = definition.part,
+		compute = definition.compute,
+		blend = definition.blend or 1,
+		enabled = true,
+	}
+
+	table.insert(fields, field)
+	table.sort(fields, function(a, b)
+		return a.priority > b.priority
+	end)
+	return id
+end
+
+function GravityField.remove(id: string)
+	for index = #fields, 1, -1 do
+		if fields[index].id == id then
+			table.remove(fields, index)
+		end
+	end
+end
+
+function GravityField.get(id: string): Field?
+	for _, field in fields do
+		if field.id == id then
+			return field
+		end
+	end
+	return nil
+end
+
+function GravityField.clear()
+	table.clear(fields)
+end
+
+--============================================================
+-- ÉVALUATION
+--============================================================
+
+local function falloffFactor(kind: string, distance: number, radius: number): number
+	if kind == "Linear" then
+		return math.clamp(1 - distance / math.max(radius, 1e-3), 0, 1)
+	elseif kind == "InverseSquare" then
+		-- normalisé pour valoir 1 à 10 % du rayon, évite la singularité en 0
+		local reference = math.max(radius * 0.1, 1e-3)
+		return math.clamp((reference * reference) / math.max(distance * distance, 1e-6), 0, 1)
+	end
+	return 1
+end
+
+local function contains(field: Field, position: Vector3): boolean
+	if field.kind == "Directional" or field.kind == "Custom" then
+		return true
+	elseif field.kind == "Point" or field.kind == "Sphere" then
+		local origin = field.origin or (field.part and field.part.Position) or Vector3.zero
+		local radius = field.radius or math.huge
+		return (position - origin).Magnitude <= radius
+	elseif field.kind == "Box" then
+		local part = field.part
+		if not part then
+			return false
+		end
+		local localPoint = part.CFrame:PointToObjectSpace(position)
+		local half = part.Size * 0.5
+		return math.abs(localPoint.X) <= half.X
+			and math.abs(localPoint.Y) <= half.Y
+			and math.abs(localPoint.Z) <= half.Z
+	end
+	return false
+end
+
+local function evaluate(field: Field, position: Vector3): Vector3?
+	if field.kind == "Custom" and field.compute then
+		return field.compute(position)
+	end
+
+	if field.kind == "Directional" or field.kind == "Box" then
+		local direction = VectorUtil.safeUnit(field.direction or -Vector3.yAxis)
+		return direction * field.strength
+	end
+
+	if field.kind == "Point" or field.kind == "Sphere" then
+		local origin = field.origin or (field.part and field.part.Position) or Vector3.zero
+		local delta = origin - position
+		local distance = delta.Magnitude
+		if distance < 1e-4 then
+			return Vector3.zero
+		end
+		local factor = falloffFactor(field.falloff, distance, field.radius or distance)
+		return (delta / distance) * (field.strength * factor)
+	end
+
+	return nil
+end
+
+--[[
+	Accélération gravitationnelle (studs/s²) au point donné.
+	Le champ actif de plus haute priorité gagne ; `blend` permet de le
+	mélanger avec la gravité par défaut pour des transitions douces.
+]]
+function GravityField.sample(position: Vector3): Vector3
+	local default = Vector3.new(0, -workspace.Gravity, 0)
+
+	for _, field in fields do
+		if not field.enabled then
+			continue
+		end
+		if not contains(field, position) then
+			continue
+		end
+		local acceleration = evaluate(field, position)
+		if acceleration then
+			if field.blend >= 1 then
+				return acceleration
+			end
+			return default:Lerp(acceleration, math.clamp(field.blend, 0, 1))
+		end
+	end
+
+	return default
+end
+
+--[[ Vecteur "haut" local : opposé de la gravité. Sert au contrôleur. ]]
+function GravityField.upVector(position: Vector3): Vector3
+	local gravity = GravityField.sample(position)
+	if gravity.Magnitude < 1e-4 then
+		return Vector3.yAxis
+	end
+	return -gravity.Unit
+end
+
+--[[ Vrai si un champ personnalisé est actif ici (sinon : gravité standard). ]]
+function GravityField.isCustomAt(position: Vector3): boolean
+	for _, field in fields do
+		if field.enabled and contains(field, position) then
+			return true
+		end
+	end
+	return false
+end
+
+--============================================================
+-- APPLICATION AUX ASSEMBLAGES
+--============================================================
+
+local Binding = {}
+Binding.__index = Binding
+
+export type Binding = typeof(setmetatable(
+	{} :: {
+		part: BasePart,
+		force: VectorForce,
+		attachment: Attachment,
+		alignOrientation: AlignOrientation?,
+		_ownsAttachment: boolean,
+		_alive: boolean,
+	},
+	Binding
+))
+
+--[[
+	Lie un assemblage aux champs de gravité.
+	`alignToSurface` fait pivoter l'objet pour que son "haut" suive la gravité
+	(pratique pour un joueur ou une caisse sur une planète).
+]]
+function GravityField.bind(part: BasePart, alignToSurface: boolean?): Binding
+	local attachment = part:FindFirstChild("GravityFieldAttachment") :: Attachment?
+	local ownsAttachment = false
+	if not attachment then
+		attachment = Instance.new("Attachment")
+		attachment.Name = "GravityFieldAttachment"
+		attachment.Parent = part
+		ownsAttachment = true
+	end
+
+	local force = Instance.new("VectorForce")
+	force.Name = "GravityFieldForce"
+	force.Attachment0 = attachment
+	force.RelativeTo = Enum.ActuatorRelativeTo.World
+	force.ApplyAtCenterOfMass = true
+	force.Force = Vector3.zero
+	force.Parent = part
+
+	local align: AlignOrientation? = nil
+	if alignToSurface then
+		align = Instance.new("AlignOrientation")
+		align.Name = "GravityFieldAlign"
+		align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+		align.Attachment0 = attachment
+		align.RigidityEnabled = false
+		align.MaxTorque = 1e6
+		align.Responsiveness = 25
+		align.Parent = part
+	end
+
+	return setmetatable({
+		part = part,
+		force = force,
+		attachment = attachment,
+		alignOrientation = align,
+		_ownsAttachment = ownsAttachment,
+		_alive = true,
+	}, Binding)
+end
+
+function Binding.step(self: Binding, _dt: number)
+	if not self._alive or not self.part.Parent then
+		return
+	end
+
+	local position = self.part.Position
+	local target = GravityField.sample(position)
+	local default = Vector3.new(0, -workspace.Gravity, 0)
+
+	-- on annule la gravité moteur et on injecte la nôtre
+	local delta = target - default
+	self.force.Force = delta * self.part.AssemblyMass
+
+	local align = self.alignOrientation
+	if align then
+		local up = target.Magnitude > 1e-4 and -target.Unit or Vector3.yAxis
+		local look = VectorUtil.projectOnPlane(self.part.CFrame.LookVector, up)
+		if look.Magnitude < 1e-3 then
+			look = VectorUtil.projectOnPlane(self.part.CFrame.RightVector, up)
+		end
+		if look.Magnitude > 1e-3 then
+			align.CFrame = CFrame.lookAt(Vector3.zero, look.Unit, up)
+		end
+	end
+end
+
+function Binding.destroy(self: Binding)
+	self._alive = false
+	self.force:Destroy()
+	if self.alignOrientation then
+		self.alignOrientation:Destroy()
+	end
+	if self._ownsAttachment then
+		self.attachment:Destroy()
+	end
+end
+
+return GravityField
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX15"><Properties><string name="Name">CharacterController</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	CharacterController.luau
+	Contrôleur de personnage "capsule flottante" (floating capsule controller).
+
+	POURQUOI PAS LE HUMANOID ?
+	Le Humanoid Roblox est une boîte noire : pas de contrôle sur l'accélération,
+	pas de coyote time, pas de wall run, des marches capricieuses. Ici on met le
+	Humanoid en état Physics et on pilote le HumanoidRootPart à la force.
+
+	PRINCIPE
+	Le personnage ne touche jamais le sol : il *lévite* à `RideHeight` grâce à
+	un ressort amorti tiré vers le bas. Ce seul mécanisme donne gratuitement :
+	  - le franchissement de marches (le ressort absorbe la différence)
+	  - les pentes (la normale oriente le déplacement)
+	  - un contact stable, sans vibration ni accrochage sur les arêtes
+	  - les plateformes mobiles (on hérite de la vélocité du sol)
+
+	Le reste (déplacement, saut, wall run, glissade) s'ajoute sous forme de
+	forces sur ce même corps rigide.
+
+	USAGE
+		local controller = CharacterController.new(character)
+		AdvancedPhysics.register(controller)     -- appelle :step(dt)
+		controller:setMoveInput(worldDirection)  -- Vector3 normalisé
+		controller:setLookDirection(cameraLook)
+		controller:requestJump()
+		controller:setSprinting(true)
+		controller:setCrouching(true)
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local GravityField = require(script.Parent.GravityField)
+local RaycastUtil = require(script.Parent.Parent.Util.RaycastUtil)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local CharacterController = {}
+CharacterController.__index = CharacterController
+
+--============================================================
+-- CONSTRUCTION
+--============================================================
+
+function CharacterController.new(character: Model, overrides: { [string]: any }?)
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	assert(root, "[CharacterController] HumanoidRootPart introuvable")
+
+	local self = setmetatable({}, CharacterController)
+
+	self.character = character
+	self.root = root
+	self.humanoid = character:FindFirstChildOfClass("Humanoid")
+	self.config = Config.merge(Config.Character, overrides)
+
+	-- Entrées
+	self._moveInput = Vector3.zero
+	self._lookDirection = root.CFrame.LookVector
+	self._sprinting = false
+	self._crouching = false
+	self._jumpHeld = false
+
+	-- État
+	self._grounded = false
+	self._groundNormal = Vector3.yAxis
+	self._groundPart = nil
+	self._platformVelocity = Vector3.zero
+	self._slopeAngle = 0
+	self._upVector = Vector3.yAxis
+	self._state = "Idle"
+
+	-- Chronos
+	self._coyoteTimer = 0
+	self._jumpBufferTimer = 0
+	self._jumpSuppressTimer = 0
+	self._jumpsLeft = self.config.MaxJumps
+	self._wallRunTimer = 0
+	self._slideTimer = 0
+	self._wallNormal = Vector3.zero
+	self._wallRunning = false
+	self._sliding = false
+	self._alive = true
+
+	-- Événements (signaux légers : simples listes de callbacks)
+	self._listeners = {
+		Jumped = {},
+		Landed = {},
+		WallRunStarted = {},
+		WallRunEnded = {},
+		SlideStarted = {},
+		SlideEnded = {},
+		StateChanged = {},
+	}
+
+	self:_buildActuators()
+	self:_takeOverHumanoid()
+	self:_rebuildRaycastParams()
+
+	return self
+end
+
+function CharacterController:_buildActuators()
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "PhysicsControllerAttachment"
+	attachment.Parent = self.root
+	self._attachment = attachment
+
+	-- Une seule VectorForce reçoit la somme de toutes les forces du frame.
+	-- On la met à jour dans PreSimulation : le moteur l'applique ensuite
+	-- pendant tout le pas de simulation, sous-pas internes compris.
+	local force = Instance.new("VectorForce")
+	force.Name = "PhysicsControllerForce"
+	force.Attachment0 = attachment
+	force.RelativeTo = Enum.ActuatorRelativeTo.World
+	force.ApplyAtCenterOfMass = true
+	force.Force = Vector3.zero
+	force.Parent = self.root
+	self._linearForce = force
+
+	local align = Instance.new("AlignOrientation")
+	align.Name = "PhysicsControllerAlign"
+	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	align.Attachment0 = attachment
+	align.RigidityEnabled = false
+	align.MaxTorque = 1e6
+	align.MaxAngularVelocity = math.huge
+	align.Responsiveness = self.config.TurnResponsiveness
+	align.Parent = self.root
+	self._alignOrientation = align
+end
+
+--[[
+	Le Humanoid continue d'exister (animations, santé, nom au-dessus de la tête)
+	mais ne pilote plus la physique.
+]]
+function CharacterController:_takeOverHumanoid()
+	local humanoid = self.humanoid
+	if not humanoid then
+		return
+	end
+
+	local disabled = {
+		Enum.HumanoidStateType.Running,
+		Enum.HumanoidStateType.RunningNoPhysics,
+		Enum.HumanoidStateType.Climbing,
+		Enum.HumanoidStateType.Jumping,
+		Enum.HumanoidStateType.Freefall,
+		Enum.HumanoidStateType.Landed,
+		Enum.HumanoidStateType.FallingDown,
+		Enum.HumanoidStateType.GettingUp,
+		Enum.HumanoidStateType.Flying,
+	}
+	for _, state in disabled do
+		humanoid:SetStateEnabled(state, false)
+	end
+
+	humanoid.AutoRotate = false
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.UseJumpPower = true
+	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+
+	-- Si quelque chose force un autre état (siège, dégâts), on reprend la main.
+	self._stateConnection = humanoid.StateChanged:Connect(function(_, new)
+		if not self._alive then
+			return
+		end
+		if new ~= Enum.HumanoidStateType.Physics and new ~= Enum.HumanoidStateType.Dead then
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+		end
+	end)
+end
+
+function CharacterController:_rebuildRaycastParams()
+	self._rayParams = RaycastUtil.params({ self.character }, nil, true)
+end
+
+--============================================================
+-- ÉVÉNEMENTS
+--============================================================
+
+function CharacterController:on(eventName: string, callback: (...any) -> ()): () -> ()
+	local bucket = self._listeners[eventName]
+	assert(bucket, `[CharacterController] événement inconnu : {eventName}`)
+	table.insert(bucket, callback)
+	return function()
+		local index = table.find(bucket, callback)
+		if index then
+			table.remove(bucket, index)
+		end
+	end
+end
+
+function CharacterController:_emit(eventName: string, ...)
+	for _, callback in self._listeners[eventName] do
+		task.spawn(callback, ...)
+	end
+end
+
+function CharacterController:_setState(newState: string)
+	if self._state == newState then
+		return
+	end
+	local previous = self._state
+	self._state = newState
+	self:_emit("StateChanged", newState, previous)
+end
+
+--============================================================
+-- ENTRÉES
+--============================================================
+
+--[[ Direction de déplacement souhaitée, en espace monde (norme <= 1). ]]
+function CharacterController:setMoveInput(direction: Vector3)
+	self._moveInput = VectorUtil.clampMagnitude(VectorUtil.sanitize(direction), 1)
+end
+
+--[[ Direction du regard : oriente le personnage. ]]
+function CharacterController:setLookDirection(direction: Vector3)
+	local flat = VectorUtil.projectOnPlane(direction, self._upVector)
+	if flat.Magnitude > 1e-3 then
+		self._lookDirection = flat.Unit
+	end
+end
+
+function CharacterController:setSprinting(active: boolean)
+	self._sprinting = active
+end
+
+function CharacterController:setCrouching(active: boolean)
+	self._crouching = active
+end
+
+--[[ À appeler quand le joueur presse Espace. Mis en mémoire tampon. ]]
+function CharacterController:requestJump()
+	self._jumpBufferTimer = self.config.JumpBuffer
+	self._jumpHeld = true
+end
+
+--[[ À appeler quand le joueur relâche Espace (saut à hauteur variable). ]]
+function CharacterController:releaseJump()
+	self._jumpHeld = false
+end
+
+--============================================================
+-- LECTURE D'ÉTAT
+--============================================================
+
+function CharacterController:isGrounded(): boolean
+	return self._grounded
+end
+
+function CharacterController:getState(): string
+	return self._state
+end
+
+function CharacterController:snapshot()
+	local velocity = self.root.AssemblyLinearVelocity
+	return {
+		state = self._state,
+		grounded = self._grounded,
+		velocity = velocity,
+		horizontalSpeed = VectorUtil.projectOnPlane(velocity, self._upVector).Magnitude,
+		upVector = self._upVector,
+		groundNormal = self._groundNormal,
+		slopeAngle = self._slopeAngle,
+		coyoteTimeLeft = self._coyoteTimer,
+		jumpsLeft = self._jumpsLeft,
+	}
+end
+
+--============================================================
+-- DÉTECTION
+--============================================================
+
+function CharacterController:_probeGround()
+	local config = self.config
+	local root = self.root
+	local up = self._upVector
+	local distance = config.RideHeight + config.ProbeExtra
+
+	local result, averagedNormal =
+		RaycastUtil.groundProbe(root.Position, up, distance, config.ProbeRadius, self._rayParams, 4)
+
+	local wasGrounded = self._grounded
+
+	if not result then
+		self._grounded = false
+		self._groundPart = nil
+		self._platformVelocity = Vector3.zero
+		self._groundNormal = up
+		self._slopeAngle = 0
+		return nil
+	end
+
+	local normal = averagedNormal
+	local slopeAngle = VectorUtil.angleBetween(normal, up)
+
+	self._groundNormal = normal
+	self._slopeAngle = slopeAngle
+	self._groundPart = result.Instance
+
+	if config.InheritPlatformVelocity and result.Instance and not result.Instance.Anchored then
+		self._platformVelocity = VectorUtil.velocityAtPoint(result.Instance, result.Position)
+	elseif config.InheritPlatformVelocity and result.Instance and result.Instance.Anchored then
+		-- une plateforme ancrée peut quand même bouger (Tween/CFrame) :
+		-- AssemblyLinearVelocity est alors nul, ce qui est le comportement voulu
+		self._platformVelocity = Vector3.zero
+	else
+		self._platformVelocity = Vector3.zero
+	end
+
+	local withinRide = result.Distance <= config.RideHeight + config.MaxStepHeight * 0.5
+	local walkable = slopeAngle <= config.MaxSlopeAngle
+	self._grounded = withinRide and walkable and self._jumpSuppressTimer <= 0
+
+	if self._grounded and not wasGrounded then
+		self._jumpsLeft = config.MaxJumps
+		self:_emit("Landed", self.root.AssemblyLinearVelocity)
+	end
+
+	return result
+end
+
+function CharacterController:_probeWalls()
+	if not self.config.WallRunEnabled then
+		self._wallNormal = Vector3.zero
+		return
+	end
+
+	local root = self.root
+	local up = self._upVector
+	local origin = root.Position
+	local distance = self.config.WallCheckDistance
+
+	local forward = VectorUtil.projectOnPlane(self._lookDirection, up)
+	if forward.Magnitude < 1e-3 then
+		self._wallNormal = Vector3.zero
+		return
+	end
+	forward = forward.Unit
+	local right = forward:Cross(up).Unit
+
+	local candidates = { right * distance, -right * distance, forward * distance }
+	local best: RaycastResult? = nil
+
+	for _, offset in candidates do
+		local result = workspace:Raycast(origin, offset, self._rayParams)
+		if result then
+			-- on ne veut que des murs quasi verticaux
+			local angle = VectorUtil.angleBetween(result.Normal, up)
+			if angle > 65 and angle < 115 then
+				if not best or result.Distance < best.Distance then
+					best = result
+				end
+			end
+		end
+	end
+
+	self._wallNormal = best and best.Normal or Vector3.zero
+	self._wallPart = best and best.Instance or nil
+end
+
+--============================================================
+-- BOUCLE
+--============================================================
+
+function CharacterController:step(dt: number)
+	if not self._alive then
+		return
+	end
+	local root = self.root
+	if not root.Parent then
+		return
+	end
+	if self.humanoid and self.humanoid.Health <= 0 then
+		self._linearForce.Force = Vector3.zero
+		return
+	end
+
+	dt = math.min(dt, Config.General.MaxDeltaTime)
+	if dt <= 0 then
+		return
+	end
+
+	-- Le "haut" vient des champs de gravité : marcher sur une planète
+	-- ou au plafond ne demande aucun code supplémentaire.
+	self._upVector = GravityField.upVector(root.Position)
+
+	self._coyoteTimer = math.max(0, self._coyoteTimer - dt)
+	self._jumpBufferTimer = math.max(0, self._jumpBufferTimer - dt)
+	self._jumpSuppressTimer = math.max(0, self._jumpSuppressTimer - dt)
+
+	local groundResult = self:_probeGround()
+	self:_probeWalls()
+
+	if self._grounded then
+		self._coyoteTimer = self.config.CoyoteTime
+	end
+
+	local mass = root.AssemblyMass
+	local velocity = root.AssemblyLinearVelocity
+	local totalForce = Vector3.zero
+
+	self:_updateSlide(dt, velocity)
+	self:_updateWallRun(dt, velocity)
+
+	totalForce += self:_rideSpringForce(groundResult, velocity, mass, dt)
+	totalForce += self:_movementForce(velocity, mass, dt)
+	totalForce += self:_gravityForce(velocity, mass)
+	totalForce += self:_slopeSlideForce(mass)
+	totalForce += self:_wallRunForce(velocity, mass)
+
+	self:_handleJump(velocity, mass)
+	self:_updateOrientation()
+	self:_updateLocomotionState(velocity)
+
+	totalForce = VectorUtil.sanitize(totalForce)
+	self._linearForce.Force = VectorUtil.clampMagnitude(totalForce, self.config.MaxGroundForce * math.max(mass, 1))
+end
+
+--============================================================
+-- SUSPENSION
+--============================================================
+
+function CharacterController:_rideSpringForce(groundResult: RaycastResult?, velocity: Vector3, mass: number, dt: number): Vector3
+	if not groundResult or self._jumpSuppressTimer > 0 then
+		return Vector3.zero
+	end
+	local config = self.config
+	-- pente trop raide : pas de suspension, on glisse
+	if self._slopeAngle > config.MaxSlopeAngle then
+		return Vector3.zero
+	end
+	if groundResult.Distance > config.RideHeight + config.MaxStepHeight then
+		return Vector3.zero
+	end
+
+	local up = self._upVector
+	local displacement = groundResult.Distance - config.RideHeight
+	local relativeVelocity = (velocity - self._platformVelocity):Dot(up)
+
+	local acceleration = -displacement * config.RideSpringStrength - relativeVelocity * config.RideSpringDamper
+	local force = up * (acceleration * mass)
+
+	-- Troisième loi de Newton : on repousse le sol.
+	-- Sans ça on peut marcher sur une planche sans jamais la faire plier.
+	if config.PushOtherParts then
+		local groundPart = groundResult.Instance
+		if groundPart and not groundPart.Anchored then
+			local reaction = VectorUtil.clampMagnitude(-force, config.MaxPushForce)
+			groundPart:ApplyImpulseAtPosition(reaction * dt, groundResult.Position)
+		end
+	end
+
+	return force
+end
+
+--============================================================
+-- DÉPLACEMENT
+--============================================================
+
+function CharacterController:_targetSpeed(): number
+	local config = self.config
+	if self._sliding then
+		return 0 -- la glissade est régie par l'inertie, pas par l'entrée
+	end
+	if self._crouching and self._grounded then
+		return config.CrouchSpeed
+	end
+	if self._sprinting then
+		return config.RunSpeed
+	end
+	return config.WalkSpeed
+end
+
+function CharacterController:_movementForce(velocity: Vector3, mass: number, dt: number): Vector3
+	local config = self.config
+	local up = self._upVector
+	local input = self._moveInput
+
+	local direction = VectorUtil.projectOnPlane(input, up)
+	local hasInput = direction.Magnitude > 1e-3
+
+	-- Sur une pente, on se déplace *le long* du sol : sans ça, monter une
+	-- rampe fait décoller le personnage à chaque pas.
+	if self._grounded and hasInput then
+		direction = VectorUtil.projectOnPlane(direction, self._groundNormal)
+	end
+
+	local targetSpeed = self:_targetSpeed()
+	local goalVelocity = (hasInput and VectorUtil.safeUnit(direction) or Vector3.zero) * targetSpeed
+	if self._grounded then
+		goalVelocity += VectorUtil.projectOnPlane(self._platformVelocity, up)
+	end
+
+	local currentPlanar = VectorUtil.projectOnPlane(velocity, up)
+	local goalPlanar = VectorUtil.projectOnPlane(goalVelocity, up)
+	local difference = goalPlanar - currentPlanar
+
+	local accelerationLimit
+	if self._sliding then
+		accelerationLimit = config.SlideFriction * 60
+	elseif self._grounded then
+		accelerationLimit = hasInput and config.GroundAcceleration or config.GroundDeceleration
+	else
+		accelerationLimit = hasInput and config.AirAcceleration or 0
+	end
+
+	local requiredAcceleration = difference / dt
+	local acceleration = VectorUtil.clampMagnitude(requiredAcceleration, accelerationLimit)
+
+	local force = acceleration * mass
+
+	-- Traînée en l'air : permet de conserver l'élan sans dériver éternellement
+	if not self._grounded and not self._wallRunning then
+		force -= currentPlanar * (config.AirDrag * mass)
+	end
+
+	return force
+end
+
+--============================================================
+-- GRAVITÉ (mise en forme du ressenti)
+--============================================================
+
+function CharacterController:_gravityForce(velocity: Vector3, mass: number): Vector3
+	local config = self.config
+	local desiredGravity = GravityField.sample(self.root.Position)
+	local engineGravity = Vector3.new(0, -workspace.Gravity, 0)
+
+	local scale = 1
+	if self._wallRunning then
+		scale = config.WallRunGravityScale
+	elseif not self._grounded then
+		local vertical = velocity:Dot(self._upVector)
+		if vertical < -0.1 then
+			-- chute : on alourdit, un saut "flottant" est le défaut n°1 du game feel
+			scale = config.FallGravityScale
+		elseif vertical > 0.1 and not self._jumpHeld then
+			-- saut relâché tôt : retombée accélérée
+			scale = config.LowJumpGravityScale
+		end
+	end
+
+	-- on annule la gravité moteur et on applique la nôtre, mise à l'échelle
+	return (desiredGravity * scale - engineGravity) * mass
+end
+
+--============================================================
+-- PENTES RAIDES
+--============================================================
+
+function CharacterController:_slopeSlideForce(mass: number): Vector3
+	if self._groundPart == nil then
+		return Vector3.zero
+	end
+
+	-- direction de plus grande pente
+	local downhill = VectorUtil.projectOnPlane(-self._upVector, self._groundNormal)
+	if downhill.Magnitude < 1e-3 then
+		return Vector3.zero
+	end
+	local downhillUnit = downhill.Unit
+
+	-- Glissade volontaire : on gagne de la vitesse en descente, ce qui permet
+	-- d'enchaîner les pentes sans jamais relancer le sprint.
+	if self._sliding and self._grounded then
+		local steepness = math.clamp(self._slopeAngle / math.max(self.config.MaxSlopeAngle, 1e-3), 0, 1)
+		return downhillUnit * (self.config.SlideSlopeBoost * steepness * mass)
+	end
+
+	-- Pente trop raide : on dévale, qu'on le veuille ou non.
+	if self._grounded or self._slopeAngle <= self.config.MaxSlopeAngle then
+		return Vector3.zero
+	end
+
+	local excess = math.clamp((self._slopeAngle - self.config.MaxSlopeAngle) / 30, 0, 1)
+	return downhillUnit * (self.config.SlideAcceleration * excess * mass)
+end
+
+--============================================================
+-- SAUT
+--============================================================
+
+function CharacterController:_handleJump(velocity: Vector3, mass: number)
+	local config = self.config
+	local up = self._upVector
+
+	-- Saut mural : prioritaire, il relance le joueur loin du mur
+	if self._jumpBufferTimer > 0 and (self._wallRunning or (self._wallNormal.Magnitude > 0 and not self._grounded)) then
+		self._jumpBufferTimer = 0
+		self._jumpSuppressTimer = config.JumpSuppressTime
+		self:_stopWallRun()
+
+		local vertical = velocity:Dot(up)
+		local impulse = up * ((config.WallJumpVerticalSpeed - vertical) * mass)
+		impulse += self._wallNormal * (config.WallJumpHorizontalSpeed * mass)
+		self.root:ApplyImpulse(impulse)
+		self:_emit("Jumped", "Wall")
+		return
+	end
+
+	if self._jumpBufferTimer <= 0 then
+		return
+	end
+
+	local canGroundJump = self._grounded or self._coyoteTimer > 0
+	local canAirJump = self._jumpsLeft > 1 or (not canGroundJump and self._jumpsLeft > 0)
+
+	if not canGroundJump and not canAirJump then
+		return
+	end
+
+	self._jumpBufferTimer = 0
+	self._jumpSuppressTimer = config.JumpSuppressTime
+	self._coyoteTimer = 0
+	self._grounded = false
+	self._jumpsLeft = math.max(0, self._jumpsLeft - 1)
+	self:_stopSlide()
+
+	-- v = sqrt(2 g h) : on vise une hauteur, pas une vitesse magique
+	local gravityMagnitude = math.max(GravityField.sample(self.root.Position).Magnitude, 1e-3)
+	local jumpVelocity = math.sqrt(2 * gravityMagnitude * config.JumpHeight)
+
+	-- on *remplace* la composante verticale : un saut depuis une chute
+	-- doit monter aussi haut qu'un saut à l'arrêt
+	local vertical = velocity:Dot(up)
+	self.root:ApplyImpulse(up * ((jumpVelocity - vertical) * mass))
+
+	self:_emit("Jumped", canGroundJump and "Ground" or "Air")
+end
+
+--[[
+	Coupe le saut si la touche est relâchée pendant la montée.
+	Appelé depuis releaseJump via le prochain step (voir _gravityForce),
+	mais on offre aussi une coupure immédiate plus nette.
+]]
+function CharacterController:cutJump()
+	local up = self._upVector
+	local velocity = self.root.AssemblyLinearVelocity
+	local vertical = velocity:Dot(up)
+	if vertical > 0 then
+		local target = vertical * self.config.VariableJumpCut
+		self.root:ApplyImpulse(up * ((target - vertical) * self.root.AssemblyMass))
+	end
+	self._jumpHeld = false
+end
+
+--============================================================
+-- WALL RUN
+--============================================================
+
+function CharacterController:_updateWallRun(dt: number, velocity: Vector3)
+	local config = self.config
+	if not config.WallRunEnabled then
+		return
+	end
+
+	if self._wallRunning then
+		self._wallRunTimer -= dt
+		local speed = VectorUtil.projectOnPlane(velocity, self._upVector).Magnitude
+		local lostWall = self._wallNormal.Magnitude < 1e-3
+		if lostWall or self._grounded or self._wallRunTimer <= 0 or speed < config.WallRunMinSpeed * 0.6 then
+			self:_stopWallRun()
+		end
+		return
+	end
+
+	if self._grounded or self._wallNormal.Magnitude < 1e-3 then
+		return
+	end
+	if self._moveInput.Magnitude < 0.2 then
+		return
+	end
+
+	local speed = VectorUtil.projectOnPlane(velocity, self._upVector).Magnitude
+	if speed < config.WallRunMinSpeed then
+		return
+	end
+
+	-- il faut avancer *le long* du mur, pas foncer dedans
+	local along = VectorUtil.projectOnPlane(velocity, self._wallNormal)
+	if along.Magnitude < config.WallRunMinSpeed * 0.5 then
+		return
+	end
+
+	self._wallRunning = true
+	self._wallRunTimer = config.WallRunMaxTime
+	self._jumpsLeft = math.max(self._jumpsLeft, 1)
+	self:_emit("WallRunStarted", self._wallNormal)
+end
+
+function CharacterController:_stopWallRun()
+	if not self._wallRunning then
+		return
+	end
+	self._wallRunning = false
+	self._wallRunTimer = 0
+	self:_emit("WallRunEnded")
+end
+
+function CharacterController:_wallRunForce(velocity: Vector3, mass: number): Vector3
+	if not self._wallRunning or self._wallNormal.Magnitude < 1e-3 then
+		return Vector3.zero
+	end
+	-- on colle au mur, sinon la moindre irrégularité éjecte le joueur
+	local stick = -self._wallNormal * (self.config.WallRunStickForce * mass)
+
+	-- et on conserve l'élan le long du mur
+	local along = VectorUtil.projectOnPlane(velocity, self._wallNormal)
+	local alongPlanar = VectorUtil.projectOnPlane(along, self._upVector)
+	local boost = Vector3.zero
+	if alongPlanar.Magnitude > 1e-3 then
+		boost = alongPlanar.Unit * (self.config.GroundAcceleration * 0.25 * mass) * self._moveInput.Magnitude
+	end
+
+	return stick + boost
+end
+
+--============================================================
+-- GLISSADE
+--============================================================
+
+function CharacterController:_updateSlide(dt: number, velocity: Vector3)
+	local config = self.config
+	if not config.SlideEnabled then
+		return
+	end
+
+	local planarSpeed = VectorUtil.projectOnPlane(velocity, self._upVector).Magnitude
+
+	if self._sliding then
+		self._slideTimer -= dt
+		local downhill = VectorUtil.projectOnPlane(-self._upVector, self._groundNormal)
+		local onSlope = downhill.Magnitude > 0.15 and self._grounded
+
+		-- sur une pente on garde la glissade tant que ça descend
+		local expired = self._slideTimer <= 0 and not onSlope
+		if not self._crouching or not self._grounded or planarSpeed < config.SlideMinSpeed * 0.4 or expired then
+			self:_stopSlide()
+		end
+		return
+	end
+
+	if self._crouching and self._grounded and planarSpeed >= config.SlideMinSpeed then
+		self._sliding = true
+		self._slideTimer = config.SlideMaxTime
+		self:_emit("SlideStarted", planarSpeed)
+	end
+end
+
+function CharacterController:_stopSlide()
+	if not self._sliding then
+		return
+	end
+	self._sliding = false
+	self._slideTimer = 0
+	self:_emit("SlideEnded")
+end
+
+--============================================================
+-- ORIENTATION
+--============================================================
+
+function CharacterController:_updateOrientation()
+	local up = self._upVector
+	local look = self._lookDirection
+
+	-- en glissade on regarde dans le sens du mouvement, c'est plus lisible
+	if self._sliding then
+		local velocityDirection = VectorUtil.projectOnPlane(self.root.AssemblyLinearVelocity, up)
+		if velocityDirection.Magnitude > 1e-2 then
+			look = velocityDirection.Unit
+		end
+	end
+
+	local flat = VectorUtil.projectOnPlane(look, up)
+	if flat.Magnitude < 1e-3 then
+		return
+	end
+	self._alignOrientation.CFrame = CFrame.lookAt(Vector3.zero, flat.Unit, up)
+end
+
+--============================================================
+-- ÉTAT DE LOCOMOTION (pour piloter les animations)
+--============================================================
+
+function CharacterController:_updateLocomotionState(velocity: Vector3)
+	local planarSpeed = VectorUtil.projectOnPlane(velocity, self._upVector).Magnitude
+
+	if self._wallRunning then
+		self:_setState("WallRunning")
+	elseif self._sliding then
+		self:_setState("Sliding")
+	elseif not self._grounded then
+		self:_setState("Airborne")
+	elseif self._crouching then
+		self:_setState("Crouching")
+	elseif planarSpeed > self.config.WalkSpeed + 1 then
+		self:_setState("Running")
+	elseif planarSpeed > 0.6 then
+		self:_setState("Walking")
+	else
+		self:_setState("Idle")
+	end
+end
+
+--============================================================
+-- NETTOYAGE
+--============================================================
+
+function CharacterController:destroy()
+	if not self._alive then
+		return
+	end
+	self._alive = false
+
+	if self._stateConnection then
+		self._stateConnection:Disconnect()
+		self._stateConnection = nil
+	end
+	if self._linearForce then
+		self._linearForce:Destroy()
+	end
+	if self._alignOrientation then
+		self._alignOrientation:Destroy()
+	end
+	if self._attachment then
+		self._attachment:Destroy()
+	end
+
+	local humanoid = self.humanoid
+	if humanoid and humanoid.Parent then
+		for _, state in Enum.HumanoidStateType:GetEnumItems() do
+			if state ~= Enum.HumanoidStateType.None then
+				pcall(function()
+					humanoid:SetStateEnabled(state, true)
+				end)
+			end
+		end
+		humanoid.AutoRotate = true
+		humanoid.WalkSpeed = 16
+		humanoid.JumpPower = 50
+		humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+	end
+
+	table.clear(self._listeners)
+end
+
+return CharacterController
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX16"><Properties><string name="Name">ProjectileSystem</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	ProjectileSystem.luau
+	Balistique sans pièces physiques.
+
+	Un projectile rapide simulé avec une vraie Part traverse les murs : à
+	3000 studs/s et 60 FPS, il parcourt 50 studs entre deux images. On simule
+	donc le projectile *mathématiquement* et on relie chaque paire de positions
+	successives par un raycast — aucune collision ne peut être manquée.
+
+	Modélisation :
+	  - traînée quadratique (la balle ralentit, la portée n'est pas infinie)
+	  - effet Magnus (trajectoire courbe pour les projectiles en rotation)
+	  - gravité issue des GravityField (fonctionne sur une planète)
+	  - intégration RK4 : indispensable, l'accélération dépend de la vitesse
+	  - pénétration des matériaux avec budget d'épaisseur
+	  - ricochets en incidence rasante
+
+	Le rendu est laissé à l'appelant via `onUpdate` : la simulation reste
+	utilisable côté serveur sans le moindre visuel.
+]]
+
+local Aerodynamics = require(script.Parent.Parent.Solvers.Aerodynamics)
+local Config = require(script.Parent.Parent.Config)
+local GravityField = require(script.Parent.GravityField)
+local Integrator = require(script.Parent.Parent.Solvers.Integrator)
+local RaycastUtil = require(script.Parent.Parent.Util.RaycastUtil)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local ProjectileSystem = {}
+
+-- Distance maximale parcourue en un sous-pas. Plus c'est petit, plus la
+-- courbure de la trajectoire est fidèle (et plus ça coûte cher).
+local MAX_SEGMENT_STUDS = 24
+
+local active: { any } = {}
+
+--============================================================
+-- CRÉATION
+--============================================================
+
+local Projectile = {}
+Projectile.__index = Projectile
+
+--[[
+	Lance un projectile. Voir Types.ProjectileDef pour tous les champs.
+
+		ProjectileSystem.fire({
+			position = muzzle.WorldPosition,
+			velocity = direction * 900,
+			penetrations = 2,
+			penetrationPower = 4,
+			ricochets = 1,
+			onHit = function(hit) ... end,
+			onUpdate = function(pos, vel, dt) tracer:move(pos) end,
+		})
+]]
+function ProjectileSystem.fire(definition)
+	local defaults = Config.Projectile
+
+	local params = definition.raycastParams or RaycastUtil.params()
+
+	local projectile = setmetatable({
+		position = definition.position,
+		velocity = definition.velocity,
+		origin = definition.position,
+
+		mass = definition.mass or defaults.Mass,
+		dragCoefficient = definition.dragCoefficient or defaults.DragCoefficient,
+		crossSection = definition.crossSection or defaults.CrossSection,
+		gravityScale = definition.gravityScale or defaults.GravityScale,
+		spin = definition.spin,
+		magnusCoefficient = definition.magnusCoefficient or defaults.MagnusCoefficient,
+		wind = definition.wind,
+
+		lifetime = definition.lifetime or defaults.Lifetime,
+		maxDistance = definition.maxDistance or defaults.MaxDistance,
+		minSpeed = definition.minSpeed or defaults.MinSpeed,
+
+		penetrationsLeft = definition.penetrations or defaults.Penetrations,
+		penetrationBudget = definition.penetrationPower or defaults.PenetrationPower,
+		ricochetsLeft = definition.ricochets or defaults.Ricochets,
+		ricochetMaxAngle = definition.ricochetMaxAngle or defaults.RicochetMaxAngle,
+		restitution = definition.restitution or defaults.Restitution,
+		tangentFriction = definition.tangentFriction or defaults.TangentFriction,
+
+		radius = definition.radius or 0,
+		useGravityFields = definition.useGravityFields ~= false,
+		raycastParams = params,
+
+		onUpdate = definition.onUpdate,
+		onHit = definition.onHit,
+		onTerminate = definition.onTerminate,
+		userData = definition.userData,
+
+		elapsed = 0,
+		distanceTravelled = 0,
+		alive = true,
+		_ignored = {},
+	}, Projectile)
+
+	table.insert(active, projectile)
+	return projectile
+end
+
+function Projectile:terminate(reason: string)
+	if not self.alive then
+		return
+	end
+	self.alive = false
+	if self.onTerminate then
+		task.spawn(self.onTerminate, self.position, reason)
+	end
+end
+
+--[[ Ajoute une instance à ignorer pour ce projectile uniquement. ]]
+function Projectile:ignore(instance: Instance)
+	table.insert(self._ignored, instance)
+	local newParams = RaycastParams.new()
+	newParams.FilterType = Enum.RaycastFilterType.Exclude
+	local combined = table.clone(self.raycastParams.FilterDescendantsInstances)
+	for _, item in self._ignored do
+		table.insert(combined, item)
+	end
+	newParams.FilterDescendantsInstances = combined
+	newParams.IgnoreWater = self.raycastParams.IgnoreWater
+	newParams.CollisionGroup = self.raycastParams.CollisionGroup
+	newParams.RespectCanCollide = self.raycastParams.RespectCanCollide
+	self.raycastParams = newParams
+end
+
+--============================================================
+-- PHYSIQUE
+--============================================================
+
+function Projectile:_acceleration(velocity: Vector3): Vector3
+	local gravity
+	if self.useGravityFields then
+		gravity = GravityField.sample(self.position) * self.gravityScale
+	else
+		gravity = Vector3.new(0, -workspace.Gravity * self.gravityScale, 0)
+	end
+
+	return Aerodynamics.projectileAcceleration(velocity, {
+		mass = self.mass,
+		gravity = gravity,
+		drag = {
+			dragCoefficient = self.dragCoefficient,
+			crossSection = self.crossSection,
+			density = Config.Environment.AirDensity,
+			wind = self.wind,
+		},
+		spin = self.spin,
+		magnusCoefficient = self.magnusCoefficient,
+	})
+end
+
+--============================================================
+-- IMPACTS
+--============================================================
+
+--[[
+	Décide automatiquement quoi faire quand l'appelant ne le dit pas.
+	`incidenceAngle` est mesuré depuis la surface : 0° = rasant, 90° = frontal.
+	Un ricochet n'est plausible qu'en incidence rasante.
+]]
+function Projectile:_autoResolve(incidenceAngle: number): string
+	if self.ricochetsLeft > 0 and incidenceAngle <= self.ricochetMaxAngle then
+		return "Ricochet"
+	end
+	if self.penetrationsLeft > 0 and self.penetrationBudget > 0 then
+		return "Penetrate"
+	end
+	return "Stop"
+end
+
+function Projectile:_handleHit(result: RaycastResult, segmentDirection: Vector3): boolean
+	local speed = self.velocity.Magnitude
+
+	-- angle entre la trajectoire et la surface (0° = rasant, 90° = frontal)
+	local incidenceAngle = 90 - VectorUtil.angleBetween(-segmentDirection, result.Normal)
+	incidenceAngle = math.abs(incidenceAngle)
+
+	local hit = {
+		instance = result.Instance,
+		position = result.Position,
+		normal = result.Normal,
+		material = result.Material,
+		distance = self.distanceTravelled,
+		velocity = self.velocity,
+		speed = speed,
+		penetrationsLeft = self.penetrationsLeft,
+		ricochetsLeft = self.ricochetsLeft,
+		incidenceAngle = incidenceAngle,
+		userData = self.userData,
+	}
+
+	local action: string? = nil
+	if self.onHit then
+		local ok, returned = pcall(self.onHit, hit)
+		if ok then
+			action = returned
+		else
+			warn(`[ProjectileSystem] onHit a échoué : {returned}`)
+		end
+	end
+
+	action = action or self:_autoResolve(incidenceAngle)
+
+	if action == "Ignore" then
+		self:ignore(result.Instance)
+		self.position = result.Position + segmentDirection * 0.05
+		return true
+	end
+
+	if action == "Ricochet" and self.ricochetsLeft > 0 then
+		self.ricochetsLeft -= 1
+		self.velocity = VectorUtil.bounce(self.velocity, result.Normal, self.restitution, self.tangentFriction)
+		self.position = result.Position + result.Normal * 0.1
+		if self.velocity.Magnitude < self.minSpeed then
+			self:terminate("SlowAfterRicochet")
+			return false
+		end
+		return true
+	end
+
+	if action == "Penetrate" and self.penetrationsLeft > 0 then
+		local thickness, exitPosition =
+			RaycastUtil.measureThickness(result.Position, segmentDirection, self.penetrationBudget, result.Instance)
+
+		if thickness and exitPosition then
+			self.penetrationsLeft -= 1
+			self.penetrationBudget -= thickness
+
+			-- l'énergie perdue croît avec l'épaisseur traversée
+			local lossRatio = math.clamp(thickness / math.max(self.penetrationBudget + thickness, 1e-3), 0, 0.9)
+			self.velocity *= (1 - lossRatio * 0.65)
+
+			-- légère déviation, comme une vraie balle qui traverse
+			self.velocity = VectorUtil.randomInCone(self.velocity, 1.5) * self.velocity.Magnitude
+			self.position = exitPosition + segmentDirection * 0.05
+			self:ignore(result.Instance)
+
+			if self.velocity.Magnitude < self.minSpeed then
+				self:terminate("SlowAfterPenetration")
+				return false
+			end
+			return true
+		end
+	end
+
+	self.position = result.Position
+	self:terminate("Hit")
+	return false
+end
+
+--============================================================
+-- PAS DE SIMULATION
+--============================================================
+
+function Projectile:step(dt: number): boolean
+	if not self.alive then
+		return false
+	end
+
+	self.elapsed += dt
+	if self.elapsed >= self.lifetime then
+		self:terminate("Lifetime")
+		return false
+	end
+
+	local speed = self.velocity.Magnitude
+	local steps = math.clamp(math.ceil((speed * dt) / MAX_SEGMENT_STUDS), 1, Config.General.MaxSubSteps)
+	local stepDt = dt / steps
+
+	for _ = 1, steps do
+		local previousPosition = self.position
+
+		local newPosition, newVelocity = Integrator.rk4(self.position, self.velocity, stepDt, function(_, velocity)
+			return self:_acceleration(velocity)
+		end)
+
+		local segment = newPosition - previousPosition
+		local segmentLength = segment.Magnitude
+
+		if segmentLength > 1e-5 then
+			local direction = segment / segmentLength
+			local result
+			if self.radius > 0 then
+				result = RaycastUtil.sphereCast(previousPosition, self.radius, segment, self.raycastParams)
+			else
+				result = workspace:Raycast(previousPosition, segment, self.raycastParams)
+			end
+
+			if result then
+				self.velocity = newVelocity
+				self.distanceTravelled += (result.Position - previousPosition).Magnitude
+				if not self:_handleHit(result, direction) then
+					return false
+				end
+				continue
+			end
+		end
+
+		self.position = newPosition
+		self.velocity = newVelocity
+		self.distanceTravelled += segmentLength
+	end
+
+	if self.distanceTravelled >= self.maxDistance then
+		self:terminate("MaxDistance")
+		return false
+	end
+	if self.velocity.Magnitude < self.minSpeed then
+		self:terminate("TooSlow")
+		return false
+	end
+
+	if self.onUpdate then
+		self.onUpdate(self.position, self.velocity, dt)
+	end
+
+	return true
+end
+
+--============================================================
+-- GESTIONNAIRE
+--============================================================
+
+--[[ Fait avancer tous les projectiles actifs. Appelé par l'ordonnanceur. ]]
+function ProjectileSystem.step(dt: number)
+	local clamped = math.min(dt, Config.General.MaxDeltaTime)
+	for index = #active, 1, -1 do
+		local projectile = active[index]
+		local ok, alive = pcall(projectile.step, projectile, clamped)
+		if not ok then
+			warn(`[ProjectileSystem] erreur de simulation : {alive}`)
+			projectile.alive = false
+			table.remove(active, index)
+		elseif not alive then
+			table.remove(active, index)
+		end
+	end
+end
+
+function ProjectileSystem.count(): number
+	return #active
+end
+
+function ProjectileSystem.clear()
+	for _, projectile in active do
+		projectile:terminate("Cleared")
+	end
+	table.clear(active)
+end
+
+--============================================================
+-- PRÉVISUALISATION
+--============================================================
+
+--[[
+	Calcule la trajectoire *sans* la simuler : sert à dessiner l'arc d'une
+	grenade ou d'un grappin. S'arrête au premier obstacle.
+	Renvoie la liste des points et le RaycastResult final (ou nil).
+]]
+function ProjectileSystem.predictPath(definition, maxPoints: number?, timeStep: number?): ({ Vector3 }, RaycastResult?)
+	local points: { Vector3 } = {}
+	local steps = maxPoints or 60
+	local dt = timeStep or (1 / 30)
+
+	local probe = setmetatable({
+		position = definition.position,
+		velocity = definition.velocity,
+		mass = definition.mass or Config.Projectile.Mass,
+		dragCoefficient = definition.dragCoefficient or Config.Projectile.DragCoefficient,
+		crossSection = definition.crossSection or Config.Projectile.CrossSection,
+		gravityScale = definition.gravityScale or 1,
+		spin = definition.spin,
+		magnusCoefficient = definition.magnusCoefficient or Config.Projectile.MagnusCoefficient,
+		wind = definition.wind,
+		useGravityFields = definition.useGravityFields ~= false,
+	}, Projectile)
+
+	local params = definition.raycastParams or RaycastUtil.params()
+	table.insert(points, probe.position)
+
+	for _ = 1, steps do
+		local previous = probe.position
+		local newPosition, newVelocity = Integrator.rk4(probe.position, probe.velocity, dt, function(_, velocity)
+			return probe:_acceleration(velocity)
+		end)
+
+		local segment = newPosition - previous
+		local result = workspace:Raycast(previous, segment, params)
+		if result then
+			table.insert(points, result.Position)
+			return points, result
+		end
+
+		probe.position = newPosition
+		probe.velocity = newVelocity
+		table.insert(points, newPosition)
+	end
+
+	return points, nil
+end
+
+return ProjectileSystem
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX17"><Properties><string name="Name">VehicleController</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	VehicleController.luau
+	Véhicule à suspension par raycast ("raycast vehicle"), le modèle utilisé
+	par la quasi-totalité des jeux de course.
+
+	Il n'y a aucune roue physique : quatre rayons partent du châssis, et
+	à chaque contact on applique trois forces au point de contact :
+	  1. suspension    — ressort/amortisseur le long de la normale
+	  2. adhérence latérale — annule le glissement de côté (le "rail" du pneu)
+	  3. traction/freinage  — pousse ou freine le long de l'axe de la roue
+
+	Avantages : pas de contraintes instables, pas de roues qui se coincent,
+	un comportement identique quel que soit le framerate, et un réglage
+	entièrement paramétrique (raideur, grip, transfert de charge).
+
+	Le "cercle de friction" limite la somme vectorielle des forces du pneu à
+	µ × charge : accélérer à fond en virage fait donc naturellement décrocher.
+
+	USAGE
+		local car = VehicleController.new(chassis, {
+			wheels = {
+				{ offset = Vector3.new(-3,-1, 5), radius = 1.5, steer = true,  drive = false },
+				{ offset = Vector3.new( 3,-1, 5), radius = 1.5, steer = true,  drive = false },
+				{ offset = Vector3.new(-3,-1,-5), radius = 1.5, steer = false, drive = true  },
+				{ offset = Vector3.new( 3,-1,-5), radius = 1.5, steer = false, drive = true  },
+			},
+		})
+		AdvancedPhysics.register(car)
+		car:setThrottle(1) ; car:setSteer(-1) ; car:setBrake(0)
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local RaycastUtil = require(script.Parent.Parent.Util.RaycastUtil)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local VehicleController = {}
+VehicleController.__index = VehicleController
+
+--============================================================
+-- CONSTRUCTION
+--============================================================
+
+function VehicleController.new(chassis: BasePart, options)
+	options = options or {}
+	local self = setmetatable({}, VehicleController)
+
+	self.chassis = chassis
+	self.config = Config.merge(Config.Vehicle, options.overrides)
+	self._alive = true
+
+	-- Entrées, toutes dans [-1, 1] ou [0, 1]
+	self._throttle = 0
+	self._steerInput = 0
+	self._brake = 0
+	self._handbrake = false
+	self._steerAngle = 0
+
+	self._wheels = {}
+	for index, definition in options.wheels or {} do
+		self._wheels[index] = {
+			def = definition,
+			grounded = false,
+			compression = 0,
+			suspensionLength = self.config.SuspensionRestLength,
+			previousLength = self.config.SuspensionRestLength,
+			contactPoint = Vector3.zero,
+			contactNormal = Vector3.yAxis,
+			normalForce = 0,
+			steerAngle = 0,
+			spinAngle = 0,
+			slipRatio = 0,
+			slipAngle = 0,
+			instance = definition.model,
+		}
+	end
+
+	-- Barres anti-roulis : paires gauche/droite fournies par l'appelant
+	-- sous forme d'index, ex. { {1,2}, {3,4} }
+	self._antiRollPairs = options.antiRollPairs or {}
+
+	local ignoreList: { Instance } = { chassis }
+	local root = chassis:FindFirstAncestorOfClass("Model")
+	if root then
+		table.insert(ignoreList, root)
+	end
+	for _, wheel in self._wheels do
+		if wheel.instance then
+			table.insert(ignoreList, wheel.instance)
+		end
+	end
+	if options.ignore then
+		for _, instance in options.ignore do
+			table.insert(ignoreList, instance)
+		end
+	end
+
+	self._rayParams = RaycastUtil.params(ignoreList)
+
+	return self
+end
+
+--============================================================
+-- ENTRÉES
+--============================================================
+
+function VehicleController:setThrottle(value: number)
+	self._throttle = math.clamp(value, -1, 1)
+end
+
+function VehicleController:setSteer(value: number)
+	self._steerInput = math.clamp(value, -1, 1)
+end
+
+function VehicleController:setBrake(value: number)
+	self._brake = math.clamp(value, 0, 1)
+end
+
+function VehicleController:setHandbrake(active: boolean)
+	self._handbrake = active
+end
+
+function VehicleController:getSpeed(): number
+	return self.chassis.AssemblyLinearVelocity.Magnitude
+end
+
+--[[ Vitesse signée le long de l'axe du véhicule (négative en marche arrière). ]]
+function VehicleController:getForwardSpeed(): number
+	return self.chassis.AssemblyLinearVelocity:Dot(self.chassis.CFrame.LookVector)
+end
+
+function VehicleController:getWheels()
+	return self._wheels
+end
+
+--[[ Nombre de roues au sol : utile pour couper le moteur en l'air. ]]
+function VehicleController:groundedWheelCount(): number
+	local count = 0
+	for _, wheel in self._wheels do
+		if wheel.grounded then
+			count += 1
+		end
+	end
+	return count
+end
+
+--============================================================
+-- DIRECTION
+--============================================================
+
+function VehicleController:_updateSteering(dt: number)
+	local config = self.config
+	local speed = math.abs(self:getForwardSpeed())
+
+	-- Le braquage se réduit avec la vitesse : sans ça, un coup de volant
+	-- à 200 studs/s fait faire un tête-à-queue instantané.
+	local speedFactor = 1 / (1 + (speed / math.max(config.MaxSpeed, 1e-3)) * config.SteerSpeedFalloff * 4)
+	local targetAngle = math.rad(config.MaxSteerAngle) * self._steerInput * speedFactor
+
+	local maxDelta = config.SteerSpeed * dt
+	self._steerAngle = math.clamp(targetAngle - self._steerAngle, -maxDelta, maxDelta) + self._steerAngle
+end
+
+--============================================================
+-- SUSPENSION + PNEUS
+--============================================================
+
+function VehicleController:_stepWheel(wheel, dt: number, massPerWheel: number)
+	local chassis = self.chassis
+	local config = self.config
+	local chassisCF = chassis.CFrame
+	local up = chassisCF.UpVector
+
+	local anchorPoint = chassisCF:PointToWorldSpace(wheel.def.offset)
+	local rayLength = config.SuspensionRestLength + wheel.def.radius
+
+	local result = workspace:Raycast(anchorPoint, -up * rayLength, self._rayParams)
+
+	wheel.previousLength = wheel.suspensionLength
+
+	if not result then
+		wheel.grounded = false
+		wheel.compression = 0
+		wheel.suspensionLength = config.SuspensionRestLength
+		wheel.normalForce = 0
+		wheel.slipAngle = 0
+		wheel.slipRatio = 0
+		-- roue libre en l'air : on la fait tourner en roue-libre pour le visuel
+		wheel.spinAngle += (self:getForwardSpeed() / math.max(wheel.def.radius, 1e-3)) * dt
+		return
+	end
+
+	wheel.grounded = true
+	wheel.contactPoint = result.Position
+	wheel.contactNormal = result.Normal
+
+	local currentLength = math.max(result.Distance - wheel.def.radius, 0)
+	wheel.suspensionLength = currentLength
+	local compressionDistance = config.SuspensionRestLength - currentLength
+	wheel.compression = math.clamp(compressionDistance / math.max(config.SuspensionRestLength, 1e-3), 0, 1)
+
+	-- ---- 1. Suspension (ressort + amortisseur) ----
+	local contactVelocity = VectorUtil.velocityAtPoint(chassis, result.Position)
+	local compressionVelocity = -contactVelocity:Dot(up)
+
+	local springForce = compressionDistance * config.SuspensionStiffness
+	local damperForce = compressionVelocity * config.SuspensionDamping
+	local suspensionMagnitude = math.max(springForce + damperForce, 0)
+
+	-- butée de compression : évite que le châssis traverse le sol
+	if wheel.compression > config.SuspensionMaxCompression then
+		suspensionMagnitude *= 1 + (wheel.compression - config.SuspensionMaxCompression) * 12
+	end
+
+	local suspensionForce = result.Normal * suspensionMagnitude
+	wheel.normalForce = suspensionMagnitude
+
+	chassis:ApplyImpulseAtPosition(suspensionForce * dt, result.Position)
+
+	-- ---- 2. Repère du pneu ----
+	wheel.steerAngle = wheel.def.steer and self._steerAngle or 0
+	local wheelCF = chassisCF * CFrame.Angles(0, wheel.steerAngle, 0)
+	local forward = VectorUtil.safeUnit(VectorUtil.projectOnPlane(wheelCF.LookVector, result.Normal))
+	local right = VectorUtil.safeUnit(forward:Cross(result.Normal))
+	if forward.Magnitude < 1e-3 or right.Magnitude < 1e-3 then
+		return
+	end
+
+	local forwardVelocity = contactVelocity:Dot(forward)
+	local lateralVelocity = contactVelocity:Dot(right)
+
+	wheel.slipAngle = math.deg(math.atan2(lateralVelocity, math.abs(forwardVelocity) + 1e-3))
+	wheel.spinAngle += (forwardVelocity / math.max(wheel.def.radius, 1e-3)) * dt
+
+	-- Sensibilité à la charge : un pneu très chargé adhère plus, mais pas
+	-- proportionnellement. C'est ce qui rend le transfert de masse important.
+	local load = wheel.normalForce
+	local gripScale = math.pow(math.max(load, 0) / math.max(massPerWheel * workspace.Gravity, 1e-3), config.TireLoadSensitivity)
+	local maxLongitudinal = load * config.TireGripForward * gripScale
+	local maxLateral = load * config.TireGripLateral * gripScale
+
+	-- ---- 3. Force latérale (annule le glissement de côté) ----
+	local desiredLateralChange = -lateralVelocity / dt
+	local lateralForce = desiredLateralChange * massPerWheel * config.TireGripLateral * 0.25
+
+	-- ---- 4. Force longitudinale (moteur / frein) ----
+	local longitudinalForce = 0
+
+	if wheel.def.drive and not self._handbrake then
+		local speedRatio = math.clamp(math.abs(forwardVelocity) / math.max(config.MaxSpeed, 1e-3), 0, 1)
+		-- courbe de couple : plein couple à l'arrêt, nul à la vitesse max
+		local torqueCurve = 1 - speedRatio * speedRatio
+		longitudinalForce += self._throttle * config.EnginePower * torqueCurve
+	end
+
+	if self._brake > 0 then
+		local brakeBias = wheel.def.brakeBias or 0.5
+		local brakeMagnitude = config.BrakeForce * self._brake * brakeBias
+		longitudinalForce -= math.sign(forwardVelocity) * math.min(brakeMagnitude, math.abs(forwardVelocity) * massPerWheel / dt)
+	end
+
+	if self._handbrake and (wheel.def.handbrake ~= false) then
+		local handbrakeMagnitude = config.HandbrakeForce
+		longitudinalForce -= math.sign(forwardVelocity) * math.min(handbrakeMagnitude, math.abs(forwardVelocity) * massPerWheel / dt)
+		-- frein à main : on relâche l'adhérence latérale pour permettre le drift
+		lateralForce *= 0.35
+	end
+
+	-- ---- 5. Ellipse de friction ----
+	-- Un pneu n'a qu'une réserve d'adhérence, et elle n'est pas la même dans
+	-- les deux axes. On normalise chaque composante par sa limite propre :
+	-- si le total dépasse 1, on réduit les deux proportionnellement.
+	-- C'est ce qui fait décrocher la voiture quand on accélère en plein virage.
+	if maxLongitudinal > 0 and maxLateral > 0 then
+		local longitudinalUsage = longitudinalForce / maxLongitudinal
+		local lateralUsage = lateralForce / maxLateral
+		local usage = math.sqrt(longitudinalUsage * longitudinalUsage + lateralUsage * lateralUsage)
+		if usage > 1 then
+			longitudinalForce /= usage
+			lateralForce /= usage
+		end
+		wheel.slipRatio = math.min(usage, 4)
+	else
+		longitudinalForce = 0
+		lateralForce = 0
+		wheel.slipRatio = 0
+	end
+
+	local tireForce = forward * longitudinalForce + right * lateralForce
+	chassis:ApplyImpulseAtPosition(tireForce * dt, result.Position)
+
+	-- Visuel : on place la roue au bout de la suspension
+	local model = wheel.instance
+	if model then
+		local wheelPosition = anchorPoint - up * (currentLength)
+		model.CFrame = CFrame.lookAt(wheelPosition, wheelPosition + forward, result.Normal)
+			* CFrame.Angles(-wheel.spinAngle, 0, 0)
+	end
+end
+
+--============================================================
+-- BARRES ANTI-ROULIS
+--============================================================
+
+function VehicleController:_applyAntiRoll(dt: number)
+	local chassis = self.chassis
+	local up = chassis.CFrame.UpVector
+
+	for _, pair in self._antiRollPairs do
+		local left = self._wheels[pair[1]]
+		local right = self._wheels[pair[2]]
+		if not left or not right then
+			continue
+		end
+		if not left.grounded and not right.grounded then
+			continue
+		end
+
+		-- La barre transfère de la charge du côté comprimé vers l'autre :
+		-- moins de roulis en virage, sans rigidifier la suspension en ligne droite.
+		local difference = left.compression - right.compression
+		local force = difference * self.config.AntiRollStiffness
+
+		if left.grounded then
+			chassis:ApplyImpulseAtPosition(-up * force * dt, left.contactPoint)
+		end
+		if right.grounded then
+			chassis:ApplyImpulseAtPosition(up * force * dt, right.contactPoint)
+		end
+	end
+end
+
+--============================================================
+-- AÉRODYNAMIQUE
+--============================================================
+
+function VehicleController:_applyAero(dt: number)
+	local chassis = self.chassis
+	local config = self.config
+	local velocity = chassis.AssemblyLinearVelocity
+	local speed = velocity.Magnitude
+	if speed < 1e-3 then
+		return
+	end
+
+	local mass = chassis.AssemblyMass
+
+	-- Appui aérodynamique : colle la voiture au sol à haute vitesse
+	local downforce = -chassis.CFrame.UpVector * (config.DownforceCoefficient * speed * speed * mass * 1e-3)
+
+	-- Traînée : impose une vitesse de pointe cohérente
+	local drag = -velocity.Unit * (config.AeroDragCoefficient * speed * speed * mass * 1e-4)
+
+	chassis:ApplyImpulse((downforce + drag) * dt)
+
+	-- Aide au redressement en l'air : évite les tonneaux incontrôlables
+	if config.RolloverAssist > 0 and self:groundedWheelCount() == 0 then
+		local tilt = chassis.CFrame.UpVector:Cross(Vector3.yAxis)
+		chassis:ApplyAngularImpulse(tilt * (config.RolloverAssist * mass * dt * 10))
+	end
+end
+
+--============================================================
+-- BOUCLE
+--============================================================
+
+function VehicleController:step(dt: number)
+	if not self._alive or not self.chassis.Parent then
+		return
+	end
+	dt = math.min(dt, Config.General.MaxDeltaTime)
+	if dt <= 0 then
+		return
+	end
+
+	local wheelCount = #self._wheels
+	if wheelCount == 0 then
+		return
+	end
+
+	self:_updateSteering(dt)
+
+	local massPerWheel = self.chassis.AssemblyMass / wheelCount
+	for _, wheel in self._wheels do
+		self:_stepWheel(wheel, dt, massPerWheel)
+	end
+
+	self:_applyAntiRoll(dt)
+	self:_applyAero(dt)
+end
+
+function VehicleController:destroy()
+	self._alive = false
+	table.clear(self._wheels)
+end
+
+return VehicleController
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX18"><Properties><string name="Name">VerletRope</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	VerletRope.luau
+	Cordes, chaînes, câbles et grappins simulés en Verlet.
+
+	L'intégration de Verlet ne stocke pas la vitesse : elle la déduit de
+	`position - previousPosition`. Conséquence pratique : on peut déplacer
+	brutalement une particule (contrainte, collision, ancrage) sans jamais
+	injecter d'énergie parasite. C'est ce qui rend les cordes Verlet aussi
+	stables comparées à un système masses-ressorts classique.
+
+	Chaque pas :
+	  1. intégration      : x' = 2x - x_prev + a·dt²
+	  2. contraintes      : N passes de correction de distance
+	  3. collisions       : projection hors des surfaces
+	  4. retour de force  : tension transmise aux objets attachés
+
+	USAGE
+		local rope = VerletRope.new({
+			origin = anchor.Position,
+			endPosition = hook.Position,
+			segments = 20,
+			attachEnd = characterRoot,   -- la corde tire le personnage
+		})
+		AdvancedPhysics.register(rope)
+		rope:render(function(index, a, b) ... end)
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local GravityField = require(script.Parent.GravityField)
+local RaycastUtil = require(script.Parent.Parent.Util.RaycastUtil)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local VerletRope = {}
+VerletRope.__index = VerletRope
+
+--============================================================
+-- CONSTRUCTION
+--============================================================
+
+function VerletRope.new(options)
+	local config = Config.merge(Config.Rope, options.overrides)
+	local self = setmetatable({}, VerletRope)
+
+	self.config = config
+	self._alive = true
+
+	local segments = options.segments or config.Segments
+	local origin = options.origin
+	local endPosition = options.endPosition or (origin - Vector3.yAxis * 10)
+
+	self.totalLength = options.length or (endPosition - origin).Magnitude
+	self.segmentLength = self.totalLength / segments
+
+	-- Particules : position, position précédente, masse inverse (0 = ancré)
+	self.points = table.create(segments + 1)
+	for index = 0, segments do
+		local alpha = index / segments
+		local position = origin:Lerp(endPosition, alpha)
+		self.points[index + 1] = {
+			position = position,
+			previous = position,
+			inverseMass = 1,
+			anchored = false,
+		}
+	end
+
+	-- Extrémité 0 ancrée par défaut (point d'accroche)
+	self:setAnchor(1, origin)
+
+	self.attachStart = options.attachStart -- BasePart tirée par le début
+	self.attachEnd = options.attachEnd -- BasePart tirée par la fin
+	self.collide = options.collide ~= false
+	self.windInfluence = options.windInfluence or 0
+
+	local ignoreList: { Instance } = options.ignore or {}
+	if self.attachStart then
+		table.insert(ignoreList, self.attachStart)
+	end
+	if self.attachEnd then
+		table.insert(ignoreList, self.attachEnd)
+	end
+	self._rayParams = RaycastUtil.params(ignoreList)
+
+	self._renderCallback = nil
+
+	return self
+end
+
+--============================================================
+-- ANCRAGES
+--============================================================
+
+--[[ Fixe une particule à une position (inverseMass = 0). ]]
+function VerletRope:setAnchor(index: number, position: Vector3?)
+	local point = self.points[index]
+	if not point then
+		return
+	end
+	if position then
+		point.position = position
+		point.previous = position
+		point.inverseMass = 0
+		point.anchored = true
+	else
+		point.inverseMass = 1
+		point.anchored = false
+	end
+end
+
+function VerletRope:releaseAnchor(index: number)
+	self:setAnchor(index, nil)
+end
+
+function VerletRope:getPoints(): { Vector3 }
+	local result = table.create(#self.points)
+	for index, point in self.points do
+		result[index] = point.position
+	end
+	return result
+end
+
+function VerletRope:firstPoint(): Vector3
+	return self.points[1].position
+end
+
+function VerletRope:lastPoint(): Vector3
+	return self.points[#self.points].position
+end
+
+--[[ Longueur réelle actuelle (utile pour détecter la tension). ]]
+function VerletRope:currentLength(): number
+	local total = 0
+	for index = 1, #self.points - 1 do
+		total += (self.points[index + 1].position - self.points[index].position).Magnitude
+	end
+	return total
+end
+
+--[[ Change la longueur au repos : sert à enrouler/dérouler un grappin. ]]
+function VerletRope:setLength(length: number)
+	self.totalLength = math.max(length, 0.1)
+	self.segmentLength = self.totalLength / math.max(#self.points - 1, 1)
+end
+
+--============================================================
+-- SIMULATION
+--============================================================
+
+function VerletRope:_integrate(dt: number)
+	local damping = self.config.Damping
+	local wind = Config.Environment.Wind * self.windInfluence
+	local dtSquared = dt * dt
+
+	for _, point in self.points do
+		if point.inverseMass == 0 then
+			continue
+		end
+
+		local acceleration = GravityField.sample(point.position) + wind
+		local velocity = (point.position - point.previous) * damping
+
+		point.previous = point.position
+		point.position = point.position + velocity + acceleration * dtSquared
+	end
+end
+
+function VerletRope:_solveConstraints()
+	local iterations = self.config.ConstraintIterations
+	local stiffness = self.config.Stiffness
+	local restLength = self.segmentLength
+	local pointCount = #self.points
+
+	for _ = 1, iterations do
+		for index = 1, pointCount - 1 do
+			local a = self.points[index]
+			local b = self.points[index + 1]
+
+			local delta = b.position - a.position
+			local distance = delta.Magnitude
+			if distance < 1e-6 then
+				continue
+			end
+
+			local difference = (distance - restLength) / distance
+			local totalInverseMass = a.inverseMass + b.inverseMass
+			if totalInverseMass <= 0 then
+				continue
+			end
+
+			local correction = delta * (difference * stiffness / totalInverseMass)
+			a.position += correction * a.inverseMass
+			b.position -= correction * b.inverseMass
+		end
+	end
+end
+
+function VerletRope:_solveCollisions()
+	if not self.collide then
+		return
+	end
+	local radius = self.config.CollisionRadius
+	local friction = self.config.CollisionFriction
+	local bounce = self.config.CollisionBounce
+
+	for _, point in self.points do
+		if point.inverseMass == 0 then
+			continue
+		end
+
+		local motion = point.position - point.previous
+		local distance = motion.Magnitude
+		if distance < 1e-5 then
+			continue
+		end
+
+		local result = workspace:Raycast(point.previous, motion + VectorUtil.safeUnit(motion) * radius, self._rayParams)
+		if not result then
+			continue
+		end
+
+		local normal = result.Normal
+		point.position = result.Position + normal * radius
+
+		-- On décompose le mouvement : la partie normale rebondit, la partie
+		-- tangentielle est freinée. On l'écrit dans `previous`, ce qui revient
+		-- à imposer la nouvelle vitesse en Verlet.
+		local normalPart = normal * motion:Dot(normal)
+		local tangentPart = motion - normalPart
+		local newVelocity = tangentPart * (1 - friction) - normalPart * bounce
+		point.previous = point.position - newVelocity
+	end
+end
+
+--[[
+	Transmet la tension de la corde aux objets attachés.
+	Sans ça, la corde suit l'objet mais ne le retient jamais : c'est cette
+	fonction qui rend un grappin jouable.
+]]
+function VerletRope:_applyTension(dt: number)
+	local maxLength = self.totalLength * self.config.MaxStretch
+
+	local function pull(part: BasePart?, pointIndex: number, anchorIndex: number)
+		if not part or not part.Parent then
+			return
+		end
+
+		local point = self.points[pointIndex]
+		local anchor = self.points[anchorIndex]
+
+		-- la corde suit la pièce
+		point.position = part.Position
+		point.previous = part.Position
+
+		local delta = anchor.position - part.Position
+		local distance = delta.Magnitude
+		if distance <= maxLength then
+			return
+		end
+
+		local direction = delta / distance
+		local overshoot = distance - maxLength
+		local mass = part.AssemblyMass
+
+		-- rappel élastique + amortissement de la vitesse d'éloignement
+		local radialSpeed = -part.AssemblyLinearVelocity:Dot(direction)
+		local magnitude = overshoot * self.config.TensionForce - radialSpeed * self.config.TensionForce * 0.08
+		part:ApplyImpulse(direction * (math.max(magnitude, 0) * mass * dt))
+	end
+
+	pull(self.attachStart, 1, #self.points)
+	pull(self.attachEnd, #self.points, 1)
+end
+
+function VerletRope:step(dt: number)
+	if not self._alive then
+		return
+	end
+	dt = math.min(dt, Config.General.MaxDeltaTime)
+	if dt <= 0 then
+		return
+	end
+
+	self:_integrate(dt)
+	self:_solveConstraints()
+	self:_solveCollisions()
+	self:_solveConstraints() -- seconde passe : les collisions ont pu étirer la corde
+	self:_applyTension(dt)
+
+	if self._renderCallback then
+		self._renderCallback(self)
+	end
+end
+
+--============================================================
+-- RENDU
+--============================================================
+
+--[[
+	Enregistre un callback de rendu appelé après chaque pas.
+	Le module ne crée aucun visuel lui-même : libre à toi d'utiliser des
+	Beams, des Parts, un RopeConstraint ou rien du tout côté serveur.
+]]
+function VerletRope:render(callback: ((rope: any) -> ())?)
+	self._renderCallback = callback
+end
+
+--[[
+	Aide au rendu : crée des cylindres reliant les particules et retourne
+	la fonction de mise à jour à passer à :render().
+]]
+function VerletRope:createPartRenderer(parent: Instance, thickness: number?, template: BasePart?): (rope: any) -> ()
+	local radius = thickness or 0.2
+	local folder = Instance.new("Folder")
+	folder.Name = "RopeSegments"
+	folder.Parent = parent
+
+	local segments = {}
+	for index = 1, #self.points - 1 do
+		local segment: BasePart
+		if template then
+			segment = template:Clone()
+		else
+			segment = Instance.new("Part")
+			segment.Material = Enum.Material.SmoothPlastic
+			segment.Color = Color3.fromRGB(60, 50, 40)
+		end
+		segment.Name = `Segment{index}`
+		segment.Size = Vector3.new(radius, radius, self.segmentLength)
+		segment.Anchored = true
+		segment.CanCollide = false
+		segment.CanQuery = false
+		segment.CanTouch = false
+		segment.Massless = true
+		segment.Parent = folder
+		segments[index] = segment
+	end
+
+	self._renderFolder = folder
+
+	return function(rope)
+		for index, segment in segments do
+			local a = rope.points[index].position
+			local b = rope.points[index + 1].position
+			local delta = b - a
+			local length = delta.Magnitude
+			if length < 1e-4 then
+				segment.Transparency = 1
+				continue
+			end
+			segment.Transparency = 0
+			segment.Size = Vector3.new(radius, radius, length)
+			segment.CFrame = CFrame.lookAt(a + delta * 0.5, b)
+		end
+	end
+end
+
+function VerletRope:destroy()
+	self._alive = false
+	self._renderCallback = nil
+	if self._renderFolder then
+		self._renderFolder:Destroy()
+		self._renderFolder = nil
+	end
+	table.clear(self.points)
+end
+
+--============================================================
+-- GRAPPIN
+--============================================================
+
+--[[
+	Crée un grappin complet : corde + rétraction + tension sur le personnage.
+	`retractSpeed` en studs/s ; mettre 0 pour une corde de longueur fixe.
+]]
+function VerletRope.createGrapple(root: BasePart, hookPosition: Vector3, options)
+	options = options or {}
+	local rope = VerletRope.new({
+		origin = hookPosition,
+		endPosition = root.Position,
+		segments = options.segments or 16,
+		length = options.length or (hookPosition - root.Position).Magnitude,
+		attachEnd = root,
+		ignore = { root.Parent },
+		overrides = options.overrides,
+	})
+
+	rope.retractSpeed = options.retractSpeed or 28
+	rope.minLength = options.minLength or 6
+
+	local baseStep = rope.step
+	function rope:step(dt: number)
+		if self.retractSpeed > 0 then
+			self:setLength(math.max(self.totalLength - self.retractSpeed * dt, self.minLength))
+		end
+		baseStep(self, dt)
+	end
+
+	return rope
+end
+
+return VerletRope
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX19"><Properties><string name="Name">ForceEffects</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	ForceEffects.luau
+	Forces d'ambiance : explosions, attracteurs, souffles, zones de vent.
+
+	Différence avec l'objet `Explosion` de Roblox : ici on contrôle
+	l'atténuation, la ligne de vue (un mur protège vraiment), le biais
+	vertical, et on peut inclure ou non les personnages.
+]]
+
+local Config = require(script.Parent.Parent.Config)
+local RaycastUtil = require(script.Parent.Parent.Util.RaycastUtil)
+local VectorUtil = require(script.Parent.Parent.Util.VectorUtil)
+
+local ForceEffects = {}
+
+--============================================================
+-- ATTÉNUATION
+--============================================================
+
+local function falloff(kind: string, distance: number, radius: number): number
+	local normalized = math.clamp(distance / math.max(radius, 1e-3), 0, 1)
+	if kind == "None" then
+		return 1
+	elseif kind == "Linear" then
+		return 1 - normalized
+	elseif kind == "InverseSquare" then
+		-- énergie répartie sur une sphère : ~1/d², borné près du centre
+		local d = math.max(distance, radius * 0.08)
+		local reference = radius * 0.08
+		return math.clamp((reference * reference) / (d * d), 0, 1) * (1 - normalized)
+	end
+	return 1 - normalized
+end
+
+ForceEffects.falloff = falloff
+
+--============================================================
+-- EXPLOSION
+--============================================================
+
+export type ExplosionOptions = {
+	radius: number?,
+	impulse: number?, -- impulsion par unité de masse à distance nulle
+	falloff: string?,
+	upBias: number?, -- 0..1 : part de la poussée redirigée vers le haut
+	lineOfSight: boolean?, -- un mur bloque le souffle
+	ignore: { Instance }?,
+	affectAnchored: boolean?, -- inutile physiquement, sert aux callbacks
+	angularImpulse: number?, -- fait tournoyer les débris
+	onAffected: ((part: BasePart, strength: number, direction: Vector3) -> ())?,
+}
+
+--[[
+	Applique un souffle radial. Renvoie le nombre d'assemblages touchés.
+
+		ForceEffects.explode(grenade.Position, {
+			radius = 45, impulse = 220, upBias = 0.4,
+			onAffected = function(part, strength) applyDamage(part, strength * 30) end,
+		})
+]]
+function ForceEffects.explode(origin: Vector3, options: ExplosionOptions?): number
+	local settings = options or {}
+	local radius = settings.radius or Config.Force.ExplosionRadius
+	local impulse = settings.impulse or Config.Force.ExplosionImpulse
+	local falloffKind = settings.falloff or Config.Force.ExplosionFalloff
+	local upBias = settings.upBias or Config.Force.ExplosionUpBias
+	local checkSight = settings.lineOfSight
+	if checkSight == nil then
+		checkSight = Config.Force.ExplosionLineOfSight
+	end
+
+	local overlapParams = RaycastUtil.overlapParams(settings.ignore)
+	local parts = workspace:GetPartBoundsInRadius(origin, radius, overlapParams)
+
+	local sightParams = RaycastUtil.params(settings.ignore)
+	-- un assemblage ne doit recevoir qu'une impulsion, pas une par pièce
+	local processedAssemblies: { [BasePart]: boolean } = {}
+	local affected = 0
+
+	for _, part in parts do
+		if part.Anchored and not settings.affectAnchored then
+			continue
+		end
+
+		local rootPart = part.AssemblyRootPart
+		if rootPart then
+			if processedAssemblies[rootPart] then
+				continue
+			end
+			processedAssemblies[rootPart] = true
+		end
+
+		local delta = part.Position - origin
+		local distance = delta.Magnitude
+		if distance > radius then
+			continue
+		end
+
+		if checkSight and distance > 1e-3 then
+			local blockParams = RaycastParams.new()
+			blockParams.FilterType = Enum.RaycastFilterType.Exclude
+			local excluded = table.clone(settings.ignore or {})
+			table.insert(excluded, part)
+			blockParams.FilterDescendantsInstances = excluded
+
+			local blocked = workspace:Raycast(origin, delta, blockParams)
+			if blocked then
+				continue
+			end
+		end
+
+		local strength = falloff(falloffKind, distance, radius)
+		if strength <= 1e-4 then
+			continue
+		end
+
+		local direction = distance > 1e-3 and (delta / distance) or Vector3.yAxis
+		direction = VectorUtil.safeUnit(direction:Lerp(Vector3.yAxis, math.clamp(upBias, 0, 1)))
+
+		if not part.Anchored then
+			local magnitude = impulse * strength * part.AssemblyMass
+			part:ApplyImpulseAtPosition(direction * magnitude, part.Position)
+
+			local spin = settings.angularImpulse
+			if spin and spin > 0 then
+				local random = Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5)
+				part:ApplyAngularImpulse(random * (spin * strength * part.AssemblyMass))
+			end
+		end
+
+		affected += 1
+		if settings.onAffected then
+			settings.onAffected(part, strength, direction)
+		end
+	end
+
+	return affected
+end
+
+--============================================================
+-- IMPULSION DIRIGÉE (souffle conique, coup de bélier)
+--============================================================
+
+--[[
+	Souffle limité à un cône : idéal pour un fusil à pompe, un lance-flammes
+	ou une poussée télékinétique.
+]]
+function ForceEffects.cone(
+	origin: Vector3,
+	direction: Vector3,
+	options: {
+		range: number?,
+		halfAngle: number?,
+		impulse: number?,
+		ignore: { Instance }?,
+		onAffected: ((part: BasePart, strength: number) -> ())?,
+	}?
+): number
+	local settings = options or {}
+	local range = settings.range or 40
+	local halfAngle = settings.halfAngle or 30
+	local impulse = settings.impulse or 120
+	local forward = VectorUtil.safeUnit(direction)
+
+	local parts = workspace:GetPartBoundsInRadius(origin, range, RaycastUtil.overlapParams(settings.ignore))
+	local processed: { [BasePart]: boolean } = {}
+	local affected = 0
+
+	for _, part in parts do
+		if part.Anchored then
+			continue
+		end
+		local rootPart = part.AssemblyRootPart
+		if rootPart then
+			if processed[rootPart] then
+				continue
+			end
+			processed[rootPart] = true
+		end
+
+		local delta = part.Position - origin
+		local distance = delta.Magnitude
+		if distance < 1e-3 then
+			continue
+		end
+
+		local angle = VectorUtil.angleBetween(delta, forward)
+		if angle > halfAngle then
+			continue
+		end
+
+		-- atténuation combinée : distance et écart à l'axe
+		local distanceFactor = 1 - distance / range
+		local angleFactor = 1 - (angle / halfAngle) * 0.6
+		local strength = math.clamp(distanceFactor * angleFactor, 0, 1)
+
+		part:ApplyImpulseAtPosition(forward * (impulse * strength * part.AssemblyMass), part.Position)
+		affected += 1
+		if settings.onAffected then
+			settings.onAffected(part, strength)
+		end
+	end
+
+	return affected
+end
+
+--============================================================
+-- ATTRACTEUR CONTINU
+--============================================================
+
+local Attractor = {}
+Attractor.__index = Attractor
+
+--[[
+	Champ continu d'attraction ou de répulsion (trou noir, aimant, tornade).
+	`strength` négatif = répulsion.
+
+		local vortex = ForceEffects.createAttractor(orb.Position, {
+			radius = 60, strength = 250, swirl = 120,
+		})
+		AdvancedPhysics.register(vortex)
+]]
+function ForceEffects.createAttractor(origin: Vector3, options)
+	options = options or {}
+	return setmetatable({
+		origin = origin,
+		radius = options.radius or 50,
+		strength = options.strength or 200,
+		swirl = options.swirl or 0, -- composante tangentielle : effet tourbillon
+		falloff = options.falloff or Config.Force.AttractorFalloff,
+		ignore = options.ignore or {},
+		follow = options.follow, -- BasePart optionnelle à suivre
+		maxSpeed = options.maxSpeed or 400,
+		_alive = true,
+	}, Attractor)
+end
+
+function Attractor:step(dt: number)
+	if not self._alive then
+		return
+	end
+	if self.follow and self.follow.Parent then
+		self.origin = self.follow.Position
+	end
+
+	local parts = workspace:GetPartBoundsInRadius(self.origin, self.radius, RaycastUtil.overlapParams(self.ignore))
+	local processed: { [BasePart]: boolean } = {}
+
+	for _, part in parts do
+		if part.Anchored then
+			continue
+		end
+		local rootPart = part.AssemblyRootPart
+		if rootPart then
+			if processed[rootPart] then
+				continue
+			end
+			processed[rootPart] = true
+		end
+
+		local delta = self.origin - part.Position
+		local distance = delta.Magnitude
+		if distance < 1e-3 then
+			continue
+		end
+		if part.AssemblyLinearVelocity.Magnitude > self.maxSpeed then
+			continue
+		end
+
+		local direction = delta / distance
+		local strength = falloff(self.falloff, distance, self.radius)
+		local force = direction * (self.strength * strength)
+
+		if self.swirl ~= 0 then
+			-- vitesse tangentielle autour de l'axe vertical : spirale au lieu
+			-- d'une chute droite vers le centre
+			local tangent = direction:Cross(Vector3.yAxis)
+			if tangent.Magnitude > 1e-3 then
+				force += tangent.Unit * (self.swirl * strength)
+			end
+		end
+
+		part:ApplyImpulse(force * part.AssemblyMass * dt)
+	end
+end
+
+function Attractor:destroy()
+	self._alive = false
+end
+
+--============================================================
+-- HELPERS
+--============================================================
+
+--[[ Impulsion pour amener un assemblage à une vitesse cible (dash, knockback). ]]
+function ForceEffects.setVelocity(part: BasePart, targetVelocity: Vector3)
+	local delta = targetVelocity - part.AssemblyLinearVelocity
+	part:ApplyImpulse(delta * part.AssemblyMass)
+end
+
+--[[ Ajoute une vitesse sans écraser l'existante. ]]
+function ForceEffects.addVelocity(part: BasePart, deltaVelocity: Vector3)
+	part:ApplyImpulse(deltaVelocity * part.AssemblyMass)
+end
+
+--[[
+	Recul d'arme : impulsion opposée au tir, appliquée à l'épaule pour
+	produire aussi une rotation.
+]]
+function ForceEffects.recoil(part: BasePart, shotDirection: Vector3, force: number, offset: Vector3?)
+	local position = offset and part.CFrame:PointToWorldSpace(offset) or part.Position
+	part:ApplyImpulseAtPosition(-VectorUtil.safeUnit(shotDirection) * force * part.AssemblyMass, position)
+end
+
+return ForceEffects
+]]></ProtectedString></Properties></Item></Item></Item><Item class="Script" referent="RBX20"><Properties><string name="Name">PhysicsServer</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	PhysicsServer.server.luau
+	À placer dans ServerScriptService.
+
+	Montre comment câbler le framework côté serveur :
+	  - déclaration des champs de gravité de la map
+	  - tir de projectiles validé serveur (le client n'envoie qu'une intention)
+	  - flottabilité automatique sur les pièces marquées
+	  - explosions
+
+	Rien ici n'est obligatoire : c'est un exemple d'intégration à adapter.
+]]
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local AdvancedPhysics = require(ReplicatedStorage:WaitForChild("AdvancedPhysics"))
+
+local GravityField = AdvancedPhysics.GravityField
+local ProjectileSystem = AdvancedPhysics.ProjectileSystem
+local ForceEffects = AdvancedPhysics.ForceEffects
+local Buoyancy = AdvancedPhysics.Buoyancy
+local RaycastUtil = AdvancedPhysics.RaycastUtil
+
+--============================================================
+-- REMOTES
+--============================================================
+
+local remotes = ReplicatedStorage:FindFirstChild("PhysicsRemotes")
+if not remotes then
+	remotes = Instance.new("Folder")
+	remotes.Name = "PhysicsRemotes"
+	remotes.Parent = ReplicatedStorage
+end
+
+local fireRemote = remotes:FindFirstChild("FireProjectile") :: RemoteEvent?
+if not fireRemote then
+	fireRemote = Instance.new("RemoteEvent")
+	fireRemote.Name = "FireProjectile"
+	fireRemote.Parent = remotes
+end
+
+local impactRemote = remotes:FindFirstChild("ProjectileImpact") :: RemoteEvent?
+if not impactRemote then
+	impactRemote = Instance.new("RemoteEvent")
+	impactRemote.Name = "ProjectileImpact"
+	impactRemote.Parent = remotes
+end
+
+--============================================================
+-- CHAMPS DE GRAVITÉ DE LA MAP
+--============================================================
+
+--[[
+	Toute pièce taguée "PlanetGravity" devient une planète : on marche sur
+	toute sa surface, y compris à l'envers.
+]]
+local function registerPlanet(part: BasePart)
+	GravityField.add({
+		id = `planet_{part:GetDebugId()}`,
+		kind = "Point",
+		origin = part.Position,
+		radius = part.Size.X * 2.5,
+		strength = workspace.Gravity,
+		falloff = "None",
+		priority = 10,
+	})
+end
+
+for _, part in CollectionService:GetTagged("PlanetGravity") do
+	if part:IsA("BasePart") then
+		registerPlanet(part)
+	end
+end
+CollectionService:GetInstanceAddedSignal("PlanetGravity"):Connect(function(instance)
+	if instance:IsA("BasePart") then
+		registerPlanet(instance)
+	end
+end)
+
+--[[ Zones à gravité personnalisée : une pièce invisible taguée "GravityZone". ]]
+local function registerZone(part: BasePart)
+	local strength = part:GetAttribute("GravityStrength") or workspace.Gravity * 0.35
+	local directionAttribute = part:GetAttribute("GravityDirection")
+
+	GravityField.add({
+		id = `zone_{part:GetDebugId()}`,
+		kind = "Box",
+		part = part,
+		direction = directionAttribute or -part.CFrame.UpVector,
+		strength = strength,
+		priority = 20,
+		blend = part:GetAttribute("GravityBlend") or 1,
+	})
+end
+
+for _, part in CollectionService:GetTagged("GravityZone") do
+	if part:IsA("BasePart") then
+		registerZone(part)
+	end
+end
+CollectionService:GetInstanceAddedSignal("GravityZone"):Connect(function(instance)
+	if instance:IsA("BasePart") then
+		registerZone(instance)
+	end
+end)
+
+--============================================================
+-- FLOTTABILITÉ
+--============================================================
+
+local floaters: { [BasePart]: any } = {}
+
+local function addFloater(part: BasePart)
+	if floaters[part] then
+		return
+	end
+	local floater = Buoyancy.createFloater(part, {
+		surfaceY = part:GetAttribute("WaterLevel") or 0,
+		waveAmplitude = part:GetAttribute("WaveAmplitude") or 1.2,
+		waveLength = 60,
+		waveSpeed = 4,
+		linearDrag = 2.2,
+		angularDrag = 3.5,
+	})
+	floaters[part] = floater
+	AdvancedPhysics.register(floater)
+end
+
+local function removeFloater(part: BasePart)
+	local floater = floaters[part]
+	if floater then
+		AdvancedPhysics.destroy(floater)
+		floaters[part] = nil
+	end
+end
+
+for _, part in CollectionService:GetTagged("Floats") do
+	if part:IsA("BasePart") then
+		addFloater(part)
+	end
+end
+CollectionService:GetInstanceAddedSignal("Floats"):Connect(function(instance)
+	if instance:IsA("BasePart") then
+		addFloater(instance)
+	end
+end)
+CollectionService:GetInstanceRemovedSignal("Floats"):Connect(function(instance)
+	if instance:IsA("BasePart") then
+		removeFloater(instance)
+	end
+end)
+
+--============================================================
+-- TIR SERVEUR-AUTORITAIRE
+--============================================================
+
+local WEAPONS = {
+	Rifle = {
+		muzzleVelocity = 900,
+		damage = 34,
+		penetrations = 2,
+		penetrationPower = 5,
+		ricochets = 0,
+		spread = 0.6,
+		cooldown = 0.1,
+	},
+	Sniper = {
+		muzzleVelocity = 1500,
+		damage = 90,
+		penetrations = 3,
+		penetrationPower = 9,
+		ricochets = 0,
+		spread = 0.05,
+		cooldown = 1.2,
+	},
+	Ricochet = {
+		muzzleVelocity = 500,
+		damage = 25,
+		penetrations = 0,
+		penetrationPower = 0,
+		ricochets = 3,
+		spread = 1.2,
+		cooldown = 0.25,
+	},
+}
+
+local MAX_MUZZLE_DISTANCE = 12 -- studs entre le joueur et son point de départ
+local lastShot: { [Player]: number } = {}
+
+local function resolveHumanoid(part: BasePart): Humanoid?
+	local model = part:FindFirstAncestorOfClass("Model")
+	return model and model:FindFirstChildOfClass("Humanoid") or nil
+end
+
+fireRemote.OnServerEvent:Connect(function(player: Player, weaponName, origin, direction)
+	local weapon = WEAPONS[weaponName]
+	if not weapon then
+		return
+	end
+	if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+		return
+	end
+	if direction.Magnitude < 1e-3 then
+		return
+	end
+
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not root then
+		return
+	end
+
+	-- Validation : on refuse un point de départ trop loin du joueur, sinon
+	-- un client modifié pourrait tirer depuis n'importe où sur la map.
+	if (origin - root.Position).Magnitude > MAX_MUZZLE_DISTANCE then
+		origin = root.Position
+	end
+
+	local now = os.clock()
+	if now - (lastShot[player] or 0) < weapon.cooldown then
+		return
+	end
+	lastShot[player] = now
+
+	local aim = AdvancedPhysics.VectorUtil.randomInCone(direction.Unit, weapon.spread)
+
+	ProjectileSystem.fire({
+		position = origin,
+		velocity = aim * weapon.muzzleVelocity,
+		penetrations = weapon.penetrations,
+		penetrationPower = weapon.penetrationPower,
+		ricochets = weapon.ricochets,
+		raycastParams = RaycastUtil.params({ character }),
+		userData = { player = player, weapon = weaponName },
+
+		onHit = function(hit)
+			local humanoid = resolveHumanoid(hit.instance)
+			if humanoid and humanoid.Parent ~= character then
+				-- dégâts modulés par la vitesse résiduelle : une balle ayant
+				-- traversé deux murs fait moins mal
+				local speedRatio = math.clamp(hit.speed / weapon.muzzleVelocity, 0, 1)
+				local multiplier = hit.instance.Name == "Head" and 2 or 1
+				humanoid:TakeDamage(weapon.damage * speedRatio * multiplier)
+				return "Stop"
+			end
+
+			impactRemote:FireAllClients(hit.position, hit.normal, hit.material)
+			return nil -- laisse le système décider (ricochet / pénétration / arrêt)
+		end,
+	})
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	lastShot[player] = nil
+end)
+
+--============================================================
+-- EXEMPLE : BARIL EXPLOSIF
+--============================================================
+
+CollectionService:GetInstanceAddedSignal("ExplosiveBarrel"):Connect(function(instance)
+	if not instance:IsA("BasePart") then
+		return
+	end
+
+	local exploded = false
+	instance:GetAttributeChangedSignal("Health"):Connect(function()
+		if exploded or (instance:GetAttribute("Health") or 100) > 0 then
+			return
+		end
+		exploded = true
+
+		ForceEffects.explode(instance.Position, {
+			radius = instance:GetAttribute("BlastRadius") or 45,
+			impulse = 260,
+			upBias = 0.4,
+			angularImpulse = 40,
+			lineOfSight = true,
+			ignore = { instance },
+			onAffected = function(part, strength)
+				local humanoid = resolveHumanoid(part)
+				if humanoid then
+					humanoid:TakeDamage(80 * strength)
+				end
+			end,
+		})
+
+		instance:Destroy()
+	end)
+end)
+]]></ProtectedString></Properties></Item><Item class="LocalScript" referent="RBX21"><Properties><string name="Name">PhysicsClient</string><ProtectedString name="Source"><![CDATA[--!nonstrict
+--[[
+	PhysicsClient.client.luau
+	À placer dans StarterPlayer > StarterPlayerScripts.
+
+	Branche le contrôleur avancé sur le personnage local et convertit les
+	entrées (clavier, manette) en direction relative à la caméra.
+
+	Le personnage local appartient au client au sens de la propriété réseau :
+	le simuler ici est donc à la fois correct et sans latence. Le serveur
+	reste libre de valider les positions de son côté.
+]]
+
+local ContextActionService = game:GetService("ContextActionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local AdvancedPhysics = require(ReplicatedStorage:WaitForChild("AdvancedPhysics"))
+local VectorUtil = AdvancedPhysics.VectorUtil
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+local controller = nil
+local handle = nil
+local gamepadMove = Vector3.zero
+
+--============================================================
+-- ENTRÉES
+--============================================================
+
+local KEY_VECTORS = {
+	[Enum.KeyCode.W] = Vector3.new(0, 0, -1),
+	[Enum.KeyCode.S] = Vector3.new(0, 0, 1),
+	[Enum.KeyCode.A] = Vector3.new(-1, 0, 0),
+	[Enum.KeyCode.D] = Vector3.new(1, 0, 0),
+}
+
+local function readInputVector(): Vector3
+	local vector = gamepadMove
+
+	if UserInputService.KeyboardEnabled then
+		local keyboard = Vector3.zero
+		for keyCode, contribution in KEY_VECTORS do
+			if UserInputService:IsKeyDown(keyCode) then
+				keyboard += contribution
+			end
+		end
+		if keyboard.Magnitude > 0 then
+			vector = keyboard
+		end
+	end
+
+	return VectorUtil.clampMagnitude(vector, 1)
+end
+
+--[[ Convertit une entrée locale en direction monde, relative à la caméra. ]]
+local function toWorldDirection(input: Vector3, up: Vector3): Vector3
+	if input.Magnitude < 1e-3 then
+		return Vector3.zero
+	end
+
+	local cameraCF = camera.CFrame
+	local forward = VectorUtil.projectOnPlane(cameraCF.LookVector, up)
+	local right = VectorUtil.projectOnPlane(cameraCF.RightVector, up)
+
+	-- caméra regardant droit vers le haut/bas : on rattrape avec son axe UP
+	if forward.Magnitude < 1e-3 then
+		forward = VectorUtil.projectOnPlane(cameraCF.UpVector, up)
+	end
+
+	forward = VectorUtil.safeUnit(forward)
+	right = VectorUtil.safeUnit(right)
+
+	return VectorUtil.safeUnit(forward * -input.Z + right * input.X) * math.min(input.Magnitude, 1)
+end
+
+--============================================================
+-- ACTIONS
+--============================================================
+
+local function handleJump(_actionName: string, state: Enum.UserInputState)
+	if not controller then
+		return Enum.ContextActionResult.Pass
+	end
+	if state == Enum.UserInputState.Begin then
+		controller:requestJump()
+	elseif state == Enum.UserInputState.End then
+		controller:cutJump()
+	end
+	return Enum.ContextActionResult.Sink
+end
+
+local function handleSprint(_actionName: string, state: Enum.UserInputState)
+	if controller then
+		controller:setSprinting(state == Enum.UserInputState.Begin)
+	end
+	return Enum.ContextActionResult.Pass
+end
+
+local function handleCrouch(_actionName: string, state: Enum.UserInputState)
+	if controller then
+		controller:setCrouching(state == Enum.UserInputState.Begin)
+	end
+	return Enum.ContextActionResult.Pass
+end
+
+local function bindActions()
+	ContextActionService:BindAction("PhysicsJump", handleJump, true, Enum.KeyCode.Space, Enum.KeyCode.ButtonA)
+	ContextActionService:BindAction(
+		"PhysicsSprint",
+		handleSprint,
+		true,
+		Enum.KeyCode.LeftShift,
+		Enum.KeyCode.ButtonL3
+	)
+	ContextActionService:BindAction(
+		"PhysicsCrouch",
+		handleCrouch,
+		true,
+		Enum.KeyCode.LeftControl,
+		Enum.KeyCode.C,
+		Enum.KeyCode.ButtonB
+	)
+end
+
+local function unbindActions()
+	ContextActionService:UnbindAction("PhysicsJump")
+	ContextActionService:UnbindAction("PhysicsSprint")
+	ContextActionService:UnbindAction("PhysicsCrouch")
+end
+
+UserInputService.InputChanged:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+		local position = input.Position
+		-- zone morte : sans elle, la manette dérive en permanence
+		if math.abs(position.X) < 0.15 and math.abs(position.Y) < 0.15 then
+			gamepadMove = Vector3.zero
+		else
+			gamepadMove = Vector3.new(position.X, 0, -position.Y)
+		end
+	end
+end)
+
+--============================================================
+-- CYCLE DE VIE DU PERSONNAGE
+--============================================================
+
+local function teardown()
+	if handle then
+		handle.disconnect()
+		handle = nil
+	end
+	if controller then
+		controller:destroy()
+		controller = nil
+	end
+	unbindActions()
+end
+
+local function setup(character: Model)
+	teardown()
+
+	character:WaitForChild("HumanoidRootPart", 10)
+	local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
+
+	controller = AdvancedPhysics.CharacterController.new(character)
+	handle = AdvancedPhysics.register(controller)
+	bindActions()
+
+	-- Exemple : piloter les animations depuis l'état de locomotion
+	controller:on("StateChanged", function(newState: string)
+		if RunService:IsStudio() then
+			print(`[Physics] état : {newState}`)
+		end
+	end)
+
+	controller:on("Landed", function(velocity: Vector3)
+		local impactSpeed = -velocity.Y
+		if impactSpeed > 90 and humanoid then
+			-- dégâts de chute proportionnels à l'excédent de vitesse
+			humanoid:TakeDamage(math.min((impactSpeed - 90) * 0.5, 100))
+		end
+	end)
+
+	if humanoid then
+		humanoid.Died:Connect(teardown)
+	end
+end
+
+if player.Character then
+	setup(player.Character)
+end
+player.CharacterAdded:Connect(setup)
+player.CharacterRemoving:Connect(teardown)
+
+--============================================================
+-- BOUCLE D'ENTRÉES
+--============================================================
+
+-- On lit les entrées dans PreRender (juste après la caméra) puis on les
+-- pousse au contrôleur, qui les consommera dans PreSimulation.
+RunService.PreRender:Connect(function()
+	if not controller then
+		return
+	end
+
+	local snapshot = controller:snapshot()
+	local input = readInputVector()
+
+	controller:setMoveInput(toWorldDirection(input, snapshot.upVector))
+	controller:setLookDirection(camera.CFrame.LookVector)
+end)
+]]></ProtectedString></Properties></Item></Item></roblox>

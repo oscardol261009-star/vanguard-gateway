@@ -19,50 +19,31 @@ personnage, ou que la balistique, sans traîner le reste.
 
 ## Installation
 
-### Option A — Rojo (recommandé)
+**→ Guide détaillé pas à pas : [INSTALL.md](INSTALL.md)**
+
+En résumé, deux options :
+
+### Option A — Le fichier `.rbxmx` (aucune installation)
+
+Télécharge `AdvancedPhysics.rbxmx`, puis dans Studio : clic droit sur
+`Workspace` → **Insert from File...**. Toute l'arborescence arrive d'un coup ;
+il ne reste qu'à déplacer les trois éléments à leur place. Idéal pour tester.
+
+### Option B — Rojo (pour développer dans la durée)
 
 ```bash
 cd roblox-physics
 rojo serve          # puis "Connect" depuis le plugin Rojo dans Studio
 ```
 
-L'arborescence est déjà décrite dans `default.project.json` :
+Édition dans VS Code, synchronisation live avec Studio, historique Git.
+L'arborescence est décrite dans `default.project.json` :
 
 ```
 ReplicatedStorage/AdvancedPhysics        <- src/shared/AdvancedPhysics
 ServerScriptService/PhysicsServer        <- src/server/PhysicsServer.server.luau
 StarterPlayerScripts/PhysicsClient       <- src/client/PhysicsClient.client.luau
 ```
-
-### Option B — À la main dans Studio
-
-1. Dans `ReplicatedStorage`, crée un **ModuleScript** nommé `AdvancedPhysics`
-   et colle le contenu de `src/shared/AdvancedPhysics/init.luau`.
-2. Recrée l'arborescence en dessous (les noms doivent être **exacts**) :
-
-```
-AdvancedPhysics (ModuleScript)
-├── Config      (ModuleScript)
-├── Types       (ModuleScript)
-├── Util (Folder)
-│   ├── VectorUtil
-│   ├── RaycastUtil
-│   └── Spring
-├── Solvers (Folder)
-│   ├── Integrator
-│   ├── Aerodynamics
-│   └── Buoyancy
-└── Modules (Folder)
-    ├── GravityField
-    ├── CharacterController
-    ├── ProjectileSystem
-    ├── VehicleController
-    ├── VerletRope
-    └── ForceEffects
-```
-
-3. `PhysicsServer.server.luau` → **Script** dans `ServerScriptService`.
-4. `PhysicsClient.client.luau` → **LocalScript** dans `StarterPlayerScripts`.
 
 ---
 
